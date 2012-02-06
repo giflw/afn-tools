@@ -1,0 +1,111 @@
+<widgets>
+	<toplevel name="Window"
+		doc="A toplevel window. These can only contain one child widget at present; another container should be placed within a window to effect layout.">
+		<widget name="title" default='""' doc="The title of this window." />
+		<widget name="visible" default='True'
+			doc="Whether or not this window is currently visible." />
+		<state name="size" default="[0, 0]"
+			doc="The window's current size. This is a list of two integers, the first being the width and the second being the height." />
+		<state name="location" default="[0, 0]"
+			doc="The location of this window on the user's screen. This takes the same format as the size property." />
+		<state name="screen_size" default="[0, 0]"
+			doc="The size of the monitor that the window is currently showing on, in the same format as the size property. This may change if the user changes resolution or if they drag the window to a different monitor. Viewers that do not support this will set this to [0, 0]." />
+		<call name="resize"
+			doc="resize(width, height): Resizes this window to have the specified width and height." />
+		<call name="relocate"
+			doc="relocate(x, y): Moves the upper-left corner of this window to the specified position." />
+		<call name="center" doc="center(): Centers this window on the user's screen." />
+		<call name="focus"
+			doc="focus(): Requests focus for this window. On Windows, for example, the window turns orange in the start bar when this is called. This should not be called when the window is not visible." />
+		<event name="close_request"
+			doc="close_request(): Fired when the user clicks the close button on the window. The window doesn't actually close; it's up to the application to link this to the window's destroy function or the connection's close function or another function of the application's choosing." />
+	</toplevel>
+	<container name="VBox"
+		doc="A container that arranges its components vertically, top-to-bottom." />
+	<container name="HBox"
+		doc="A container that arranges its components horizontally, left-to-right." />
+	<container name="BorderPanel"
+		doc="A container that draws a border around itself.">
+		<widget name="border_width" default="1" doc="The width of the border." />
+	</container>
+	<container name="Table"
+		doc="A container that allows children to be arranged on a grid. This is very nearly identical to an HTML table.">
+		<layout name="row" default="0"
+			doc="The row on the grid at which this widget should be placed. The first row is 0." />
+		<layout name="col" default="0"
+			doc="The column on the grid at which this widget should be placed. The first column is 0." />
+		<layout name="rowspan" default="1"
+			doc="The number of rows that this widget should occupy. The last row that this widget extends into is (row+rowspan)-1." />
+		<layout name="colspan" default="1"
+			doc="The number of columns that this widget should occupy, in the same format as rowspan." />
+		<layout name="pin" default='""'
+			doc="This property specifies how the child widget should be placed in its cell if the cell is bigger than the child. It's a string that can contain any (or multiple) of the letters NSEW. Each of these letters, when present, causes that side of the child to be pinned to that side of the cell. Specifying NS or EW at the same time will cause the widget to stretch the height or width of the cell, respectively." />
+	</container>
+	<widget name="Label" doc="A widget that shows a static piece of text.">
+		<widget name="text" default='""' doc="The text of this label." />
+		<widget name="background" default='""' doc="Same as TextBox.background." />
+		<widget name="font_size" default='""' doc="Same as TextBox.font_size." />
+		<widget name="font_family" default='""'
+			doc="Same as TextBox.font_family." />
+	</widget>
+	<widget name="Button" doc="A button that can be clicked by the user.">
+		<widget name="text" default='""' doc="The text showing on this button." />
+		<event name="clicked" doc="clicked(): Fired when the user clicks this button." />
+	</widget>
+	<widget name="TextBox" doc="A single-line text input field.">
+		<widget name="width" default="20"
+			doc="The width, in characters, of the text box." />
+		<widget name="max" default="0"
+			doc="The maximum number of characters that can be stored in this text box, or 0 to allow an unlimited number of characters." />
+		<widget name="background" default='""'
+			doc="The background color, in HTML #rrggbb notation, of this text box. Setting this to the empty string (the default) uses the viewer's default background color." />
+		<widget name="font_size" default='""'
+			doc="The size of the font to use for this text box, in points." />
+		<widget name="font_family" default='""'
+			doc="The name of the font to use for this text box." />
+		<state name="text" default='""' doc="The current text in this text box." />
+		<call name="set_text"
+			doc="set_text(text): Sets the text of this text box to the specified string." />
+		<event name="enter"
+			doc="enter(): Fired when the user hits the enter key while the text field is focused. Alternative viewers may provide some other mechanism to trigger the text box's enter event." />
+	</widget>
+	<widget name="Checkbox"
+		doc="A check box. This shows a label next to a box that can be clicked to toggle the check box's state.">
+		<widget name="text" default='""'
+			doc="The text showing on this checkbox. Most UI toolkits show this as a piece of text to the right of the box itself." />
+		<widget name="flip" writable="false" default="True"
+			doc="True if this checkbox should automatically toggle its state when the user clicks on it, false if this checkbox should just fire its clicked event but not change its state. Most traditional UI toolkits act as if this were true." />
+		<state name="state" default="False"
+			doc="Whether or not this checkbox is currently marked. If flip is set to false, this will never change." />
+		<call name="set_state"
+			doc="set_state(state): Sets this checkbox's state to the specified state." />
+		<call name="mark"
+			doc="mark(): Marks this checkbox. Same as set_state(True)." />
+		<call name="clear"
+			doc="clear(): Clears this checkbox. Same as set_state(False)." />
+		<event name="clicked"
+			doc="clicked(): Fired when the user clicks this checkbox, regardless of whether or not flip is set to true." />
+	</widget>
+</widgets>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
