@@ -1,0 +1,167 @@
+So I'm going to write a smallish, working Filer, which I'm calling Filer 1, which will basically just demonstrate the whole notion mentioned in filer-notes-to-james.txt that I'm thinking of.
+
+It'll use a SQLite database to store stuff.
+
+I'm thinking there'll be a table, revisions, which basically has two columns, hash and data.
+
+hash is the hash of the revision.
+
+data is the revision's data.
+
+A revision's data will, for now, just be a json object, with keys sorted so as to produce a consistent hash.
+
+It'll be in the standard representation, with a space after the ":" and "," characters. I'll probably change that later.
+
+Actually, there'll be a third column, number, which is the revision's number. Each subsequent revision gets a new number.
+
+Both hash and number will be unique and will have corresponding unique indexes.
+
+So, the things we can do to files are create them with certain initial contents and change them by supplying a textual diff to apply to them. I'm actually thinking there won't be a delete operation for now, since one can delete a file simply by removing it from its parent directory.
+
+So, the things we can do with directories are create them with a certain set of files (which would just be a dict whose keys are filenames and whose values are hashes representing those files, or folders if they're subfolders) and modify them to have a new set of files (which would be done by specifying a new dict; items in the dict but not in the folder are added, items in the dict and in the folder are modified, and items in the dict with a value of None are removed).
+
+And then each commit json object should have a message attribute and a date attribute, which specify the commit message and the date on which the commit was made. I'll probably rework how those are actually stored later, but this'll do for now.
+
+So then we have working copies, which are just checkouts of a particular revision. Committing a new revision on a working copy commits new revisions on all of the relevant files and folders and then updates the file in the working copy that indicates what revision it's got checked out to point to the new revision.
+
+So working copies and repositories are two separate things, although they can exist in the same location: a repository is a folder with a .filerdata file in it that's the aforementioned SQLite database, and a working copy is a directory tree with a .filerversion and a .filersource in it, the former of which contains the id of the current revision and the latter of which contains the path to the repository directory (the one containing .filerdata), which can be . to specify the current directory.
+
+I'm thinking if a repository-related command is run on a working directory, it'll just use the repository that the working directory came from.
+
+So, commands I'm going to implement for now:
+
+filer checkout: Checks out a particular revision to a particular working copy. Right now, the revision has to be a folder; it should be easy enough to allow it to be a file in the future, although then I'd need to figure out how to indicate which revision it came from. (Internally, there'll be a function that works on both folders and files; this'll be run to check out the whole thing, and then .filerversion and .filersource written separately.)
+
+filer commit: Commits all changes in the current working directory. Right now this'll add all new files, modify all existing files, and remove all removed files, and same with folders. File/folder removal is simply a matter of removing the file from the parent folder.
+
+filer log: Prints a log of all revisions in the repository. This will print all revisions right now; in the future, I'll probably have it print only revisions that are parents or descendants of the working copy revision, such that running log on a working copy's root will produce roughly the same log that would be seen from, say, Mercurial or Git.
+
+So I think that's good for now. I'll obviously need to add additional commands later to merge/rename/copy things, but I'll worry about that then.
+
+So, there's going to be a module in filer1 called repository that knows how to read/write a repository. It'll have a class, Repository, that opens the SQLite database and stores a reference to it. It'll have methods for getting a list of all revisions, getting a particular revision, writing a new revision, and such. In the future, it'll have methods for getting revisions that are parents or descendants of a particular revision, pushing, pulling, etc.
+
+Then there's going to be a module in filer1 called working that knows how to read/write a working copy. More thought about how exactly to create a WorkingCopy needs to be done.
+
+Actually, I'm going to start writing the commands, and see where things go from there.
+
+
+
+So, creating a file is {"type": "file", "contents": base64 data}.
+Updating a file with a diff is {"type": "file", "diff": base64 binary diff in bsdiff4 format}.
+Creating a folder is {"type": "folder", "children": {"childname1": "childrev1", "childname2": "childrev2", ...}.
+Updating a folder is {"type": "folder", "children": {"newchild": "rev", "changedchild": "rev", "deletedchild": null}.
+All of those dicts have four additional keys, namely message, date, user, and parent. Parent is null if there is no parent (for example, a revision that creates a new file has no parent, although the revision adding it to its parent folder would if the folder already existed). message is the commit message. date is the commit date in time.time() format. user is the name of the user that made the commit (usually something like "Alexander Boyd <alex@opengroove.org").
+
+
+
+Ok, screw it, I'm having rather large issues with how to properly update a file to a particular revision. So for this prototypical Filer, I'm going to have file-related commits have their attribute "contents" always be present and always contain the file's current contents. And folders will just have their children attribute list all of their current children. Then in the future I can have a folder have a diff attribute which stores the dict showing what's changed.
+
+I think that'll work for now. And if it doesn't, I can have the diff key on folders be what's changed, and then have a diff key on files which contains two keys, old and new, the former of which is a reverse diff going back to the parent and the latter of which is a forward diff as usual. Not sure how I'd handle multiple parents yet.
+
+So yeah, I'm going to go change everything to just use that for now.
+
+
+
+So things have worked marvelously, and I think I'm going to do two things now.
+
+First is I'm going to change commit and update to work with revsets, meaning that update produces a dict of the revision that the updated folder is at along with the revisions its child folders, and their child folders etc are at, and commit takes this list and uses it as the list of parents to use. (So it'll be a list of parents, which will obviously have only one parent when the list updates, and then this'll be stored by the update command and more parents will be added as merges happen.)
+
+After I do that, I'm going to change everything to use diffs again. But I'll be doing updating a bit differently, so that it actually performs well, and can't be messed up by particular pathological cases that the old change-based update code could. Non-fast-forward updates should be able to be performed in O(n*k) worst-case time, where n is the number of revisions in the repository and k is the average depth of the tree. (And since k will typically be small, worst-case performance is linear.) The previous update algorithm had worst-case performance of O(n**k), where ** is exponentation; this obviously was quite bad.
+
+The reason for the performance issue was that the old update algorithm would update the checked-out directory one revision forward, then recursively update its children. Then it would update the checked-out directory one more revision forward and update its children, and so on. The problem was, of course, that if every file in every child revision contained a non-fast-forward revision change, then every single revision advancement of the parent caused an entire re-update of every child. And if those children had the same issue, then every single advancement of every child caused an entire update for their children, thus blowing the whole thing up and resulting in exponential time complexity.
+
+The new algorithm will do things differently: instead of advancing the parent one revision at a time and then updating all child revisions, which is rather needless as those child revisions will probably just be blown away by the next parent update step, the parent directory is completely updated to its target revision, and then every one of its child revisions is then completely updated to the target revision now specified by the parent, and so on. Thus every child can have a maximum of one entire repository pass as every child will be requested to change revisions only once by the parent. The worst-case time complexity is therefore O(n*k), which is linear since k is typically small in comparison to n.
+ 
+Note that some shortcuts will be used: if the current revision of a particular thing is an ancestor of the revision to update to, the update will just proceed from that revision; otherwise it will proceed from the target revision's root parent. This will only follow the first parent revision for now; obviously this is suboptimal, but it's how Mercurial does it so I think I can get away with it for now. (And this resolves the issue of which root to use when a thing has multiple roots; the one obtained by always following the first parent will be used.)
+
+(Note that this also means that a merge needs to contain diffs between the target and each of its parents, so that one can go from any of the parents to the child and vice versa. I'd like to either find or write an octopus merge algorithm, one that can store the whole combination of differences against all of the parents as a single thing. But that's not high priority for now.)
+
+So yeah, let's go convert things to use revstates (the thingies that say the current set of parents for a thing and all of its children) and diffs.
+
+So I just realized I've designed myself into a corner again. My idea was that multiple old copies of files are stored for when there are multiple parents, but then I realized that the fact that merges in child paths can happen means that the revstate needs to be capable of expressing multiple, independent revstates for each parent. In other words, a single revstate has not only one child revstate for each child file, but a child revstate for each combination of a child file and a revision, since they could be different.
+
+Which is getting complicated and might require storing more data than I want to.
+
+So I need to think about this a bit when it's morning.
+
+(Possible solution: only store a diff against the first parent, which would mean we'd only have the revstate track the first parent's information. The downside is that this gives special treatment to the first parent of a revision, which is something I'd like to avoid, except where it's used purely as a shortcut (as it is in the updating logic; I expect to get rid of the special treatment for first parents there once I work out how to do a decent shortest-path algorithm that can traverse multiple parents). But it might be something to consider at least for the time being.)
+
+(On seconds thought, no, the first-parent-gets-special-treatment thing is something I'm not willing to accept. So other ideas need to be thought of.)
+
+(On third thought, this is a /prototype/, for gosh sakes. I need to keep that in mind. So I think I'll use the first-parent-gets-special-treatment model for now, and change it before I actually make a production release of Filer.)
+
+Actually no, I've got a better idea: have a cache stored... hm, not sure where this should be stored... thinking having it be in the working copy for now, and maybe integrate it into the repository in the future.
+
+So, the general idea is that we keep a cache of revisions at a certain location. Then Filer can be asked to provide the content of a file at a revision, and it would look up said content in the cache, or create a new entry and update it accordingly.
+
+So at that point, a checkout would just get the relevant items from the cache and copy them into the working copy location.
+
+Then we'd need to figure out how to decide when to evict items from the cache and which items to evict.
+
+Perhaps we should just have a filer compact command that, among other things, evicts everything from the cache. It could take command-line flags specifying what to compact (I would plan on the compact command doing more than just cache eviction; it would probably pack multiple revisions into single files to save on space, similar to git, and so on), and there would be flags to tell the compact command not to evict the cache, or to evict specific revisions, or to evict any revision not in a working copy's revstate.
+
+Then that begs the question of how updates to existing working copies should be performed in the presence of a cache. It could be done one of two ways: 1, a shared function is used to update any given file or folder, which would then be used separately on the cache and on the working copy to make updates as needed; or 2, updates are made only to the cache, and updating a working copy involves creating new cached items for every member of the working copy that's changed and then copying them straight into the working copy.
+
+My gut instinct is to go with #2, for two reasons: 1, it avoids code re-use, and 2, it reduces the number of operations that have to be performed if a single revision is present multiple times in the dirtree. (Such an occurrence would likely be rare, but I can foresee some instances in which it would be useful, such as the current symlinking I have of some bits of Java code in AFN to allow a few classes to be used in multiple locations.) The series of updates would be performed once on the cached file or folder, and then the file or folder would be copied to each of the relevant locations.
+
+That solution, of course, would only maintain its efficiency as long as the mechanism for adding items to the cache is smart enough to search for ancestor revisions already in the cache and update from them instead of starting anew from one of the revison's roots. This shouldn't be too hard, as it'd pretty much be a matter of using the first-parent-gets-special-treatment-right-now algorithm I mentioned several paragraphs back for updating, with a check at each revision to see if that particular revision is already present in the cache.
+
+One important note: the cache should not store all of a revision's ancestors just because the revision itself was requested. In other words, the cache must not use itself to cache intermediate revisions, for the simple reason that this would blow up the user's disk space were a revision with 100,000 ancestors to be loaded into the cache.
+
+So, I'm thinking that for now, files should just be stored as themselves in the cache.
+
+How to store folders is, of course, another question. It would be rather neat to store them as folders containing symlinks for each child file/folder pointing to the corresponding cached revisions; if any of the revisions weren't cached, the relevant symlink would simply show up as broken. That would allow a revision whose dirchildren are also cached to actually be browsed inside the cache folder, and, indeed, a checkout of the revision to be made simply by copying the revision's cache folder, dereferencing symlinks in the process (which cp --dereference will do).
+
+On the other hand, such an approach would have cross platform compatibility problems, as Windows doesn't allow non-administrators to create symlinks. (I've really no idea their rationale for this decision, but it's Windows, so go figure.)
+
+So perhaps I should settle on an alternate scheme for now. I could always have folders be files whose contents are JSON dicts of their contents. Or I could have them be actual folders whose files' contents are the revisions they point to, but that'd use up inodes fairly fast if a lot of content was cached, so probably not the best idea.
+
+I just thought of another idea, though, that could work, and would solve a lot of issues: use git's object store as filer's storage backend to start with. If I'm reading the documentation on git correctly, its object store performs deduplication for you, so you literally could (and, if I'm still reading this correctly, git does) store all of the files' contents verbatim along with each revision, and git will deduplicate them away for you.
+
+And that would be excellent, as it would obviate the need for the whole cache thing in the first place.
+
+But I think I'm going to go with my own cache-based system for now, for two main reasons. The first is that I really don't want people to think Filer is a sort of front end to git, or that it's based on git; I want it to be distinctly its own system. The second is that I'm not sure yet if I want things to just disappear when they're no longer referenced; I expect Filer will have a similar model to git in this regard, but I don't want to decide for sure just yet.
+
+I would still like to look for a deduplicating database somewhere, however. That'd allow commits to just be stored as their entire contents as they are right now.
+
+Or maybe rsync could help...
+
+Actually no, I just found libgit2, and pygit2, and they look somewhat interesting. I'm still worried about using them because of the filer-is-a-ripoff-of-git issue, but then again, they both look quite promising.
+
+There is, of course, one slight issue, and that is that trees don't have the ability to store extra data like commit info. Commits have to be stored as separate objects, which is something I'd really prefer not to have to do.
+
+Man, if only git exposed trees as commits themselves, it'd basically be Filer. And if only I knew enough about git's file format to be able to write my own deduplicating data store, I could just do that.
+
+Maybe I should...
+
+Or maybe I should write an interface (a Python abstract class, more accurately) for interacting with a deduplicating data store, and then have the first implementation of that be based on libgit2. Then, once I work out how to actually write a deduplicating data store, I could go swap out my own implementation.
+
+So it'd more or less expose trees and blobs. I don't know how I'd handle commits yet; I might have a single commit be a tree with entries for the commit's message, data, and so on, and an entry for the commit's contents, which is a tree for a folder or a blob for a file.
+
+That'd work nicely.
+
+So now I need to go check libgit2 and pygit2 and make sure it's properly deduplicating things like I've read it does. As long as it does that, I should be good to go.
+
+I do need to figure out how commits are referenced in order to stay alive, though. I'm not yet sure if I'd want to leave the task of cleaning out unreferenced commits to the data store (in which case the libgit2-based data store might be able to use libgit2 to do it) or have Filer do it itself; arguments for the latter are that I'm still not yet sure if I want to use the same model as git for storing commit references.
+
+If I did decide to go with the latter, data store would be expected to persist all things put in them; the libgit2 implementation could possibly do that by having one ref (in the git sense, although I'm still not yet sure how to do that with libgit2) per commit. I would need to make sure that this wouldn't be too expensive, though. Or if there's a way to disable garbage collection of things in libgit2, that could possibly be used as well.
+
+
+
+So after reading about how git does things, I think I've got an even better idea: have Filer just store revisions as a file's complete contents as of that revision, but then have an abstract class for providing backing revision stores. A backing store would then be instructed to store a particular revision however it chooses to. Then I would have a backing store that just stores the revisions verbatim without any delta compression whatsoever, mainly to get an initial prototype working again. Then I'd write a backing store that stores revisions in terms of a diff with their first parent, and caches revisions as mentioned several paragraphs back. Then, at some later date, I'd write a backing store that uses a delta compression algorithm similar to git's.
+
+I'm also toying with the idea of having the abstract backing store class provide a mechanism to ask a backing store to take revisions stored in it and output them as a single file, or import revisions in a single file. The idea with this would be that backing stores could be reused for pushing and pulling, similar to how git uses packs for both storage and transfer of revisions.
+
+(And it might even be better to have the interface be such that arbitrary file-like objects can be specified to encode to or decode from; that way, a bundle file could simply be a bit of metadata followed by one of these files generated by a backing store.)
+
+That, though, would need some thought as to how things like stamps would be stored. Should the backing store know how to store these? Or should that be the responsibility of something else? And how should those be transfered between clients? (A future question to think about: how does one go about pushing stamps that a remote doesn't have without asking the remote about whether it has every single stamp the local end knows about?)
+
+
+
+
+
+
+
+
+
+

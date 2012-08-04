@@ -1,0 +1,4 @@
+#!/bin/bash
+
+command="`dirname $0`"/generate_dhcp_notice
+"`dirname $0`"/autosend2 -m speak tts "`$command "$@"`"
