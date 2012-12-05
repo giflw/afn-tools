@@ -1,0 +1,218 @@
+So I'm generalizing Filer's storage mechanism into a database, and I've already written some stuff in Haskell for it. But I've got some more ideas, so I figured I should write a technote about it.
+
+So, as it is right now, HashDB is a graph database where objects can be added and deleted, but not changed after they are created. Each object has a number of attributes and values; the attributes are strings and the values are binary data. Each object also has a number of outgoing refs, each of which point to exactly one other object and each of which also have a set of attributes and values.
+
+Each object has a hash associated with it; the hash is computed from the object's attributes and values and all outgoing refs and their attributes and values. An object cannot be changed after it's created; this in particular means that new outgoing refs cannot be added to an object after the object has been created. Incoming refs can, of course, be added by creating another object.
+
+A database stores only one copy of every object. Adding an object that already exists in a database does nothing.
+
+So that's how things stand at present. I hadn't yet worked out whether every object pointed to by a ref has to be present in a given database, so that's still a question to think about.
+
+So, the idea I'm getting now to complement this whole system is schemas. I got thinking, it's somewhat wasteful to have lots of logic to check to see if a commit object, for example, has refs pointing to a file or folder and a changeset, and issue an error if not. And when would the error occur? If it's when pulling a malformed commit, then it gets a lot harder to have pushing/pulling be implemented at the HashDB level, as Filer would need to have some input. If it's after that, then the user doesn't find out that they've pulled a malformed commit until they actually go to use it, which in my opinion is unacceptable.
+
+So I got this brilliant idea: schemas. Objects gain an additional aspect, so to speak, which is the hash of the schema object that they conform to. Schema objects specify, in some format or other that I haven't decided on yet, things like what attributes must be present and what types their values must be (I'm thinking attributes can have types other than just binary data in order to facilitate queries like looking for all commits that happened within a particular date range) and what refs with what attributes may be present and such.
+
+Then HashDB itself would enforce that any object being inserted into the database, whether because it's just been created from scratch or because it's being pulled from somewhere, conforms to its schema.
+
+The reason that this is so lovely is that then, instead of querying for anything with an attribute "type" whose value is "filer.commit" or some such thing, we can query for anything with the commit schema, which would be identified by a particular hash. And since the hash is the hash of the object containing the actual schema that the objects have to match, and since HashDB enforces that an object matches its schema, whatever its schema is, then we know that all results we get back will match the commit schema and thus will have everything we want.
+
+This also goes a long way toward solving namespacing problems that arise with using attributes like "type" to identify objects; before, there was a good chance of conflict, but now, there's relatively little, as I'm thinking schemas will somehow include a name and perhaps a description of what they are, and so two schemas would only conflict if they had the exact same name and description and actual schema specification, in which case chances are pretty high they're actually the same schema designed by the same person for the same purpose.
+
+So, a new term needs to be introduced for this, and that is dependency. An object has a dependency on (or is equivalently said to depend on) another object if it has a ref pointing to said object or if its schema is said object.
+
+One important difference between ref-related dependencies and schema-related dependencies is that I'm considering allowing a HashDB to contain objects that point to non-existent objects, the reason being that "databases" like archive files (files that contain an exported copy of a set of objects from a database; they will be used in filer pushing and pulling and when creating filer archives and will allow most of the push/pull system to be implemented at the HashDB level) will almost never be complete copies of the database, but will instead omit some objects that are known to exist on the recipient's end already. HashDB will be perfectly happy to allow this, although there will be some mechanism to produce an error if, say, a query could have returned more results but for missing objects.
+
+HashDB will not, however, permit an object's schema to be missing. If an object is inserted into a database, its schema must already be present.
+
+This makes copying things between databases slightly more complicated, but not too much.
+
+Slight detour: I'm currently writing HashDB in Haskell, which I'm liking quite well at present.
+
+So, I'm thinking I'll have a utility library in the Haskell implementation that has, say, copyObject :: (ReadDB r, WriteDB w) => r -> w -> Hash -> IO (), which copies a single object and takes care to copy its schema as well if it's not already present, and perhaps copyObjectAndRefs (with the same signature) that copies an object and all of its refs. And I might have copyAll :: (ReadDB r, WriteDB w) => r -> w -> IO (), which copies all objects present in r into w. (This would be useful for pulling; a list of objects not present locally is somehow exchanged with the remote end, which sends an archive to the local end, which then imports it with copyAll archiveDb localDb.)
+
+One other issue I'm facing with schemas is the fact that HashDB, by its very nature of using object hashes, provides a directed acyclic graph: cycles cannot exist. The problem, of course, is that while the schema of a schema can be a schema defining the format of schemas themselves, there isn't really a clear-cut answer to what the schema of the schema of schemas should be. Ideally it would be itself, but that's not possible since cycles can't exist.
+
+Perhaps, then, schemas don't themselves have a schema, or at least they're not required to. Their format would be checked when inserting an object that uses them as its schema; HashDB would reject any object whose referenced schema is malformed. This would incur a performance penalty as the validity of every object's schema has to be checked (and thus the schema actually read from the database) when inserting the object, but smart HashDB libraries could keep an internal list of schemas that have already been verified since opening the database and consult that list before reverifying a schema.
+
+So that's all good. Now I need to work out a schema format.
+
+Well, first I need to work out what schemas can actually specify.
+
+And I also need to work out how attribute values work, as I want them to be able to have values other than just binary data.
+
+So, first off, queries specify constraints on attributes that are typed to a particular type of attribute value, and attributes that exist but do not have that type of value do not match. So, for example, a query matching an object with an attribute "test" whose value is an int greater than 5 will not match objects with an attribute "test" whose value is the string "6". I expect I'll add queries that query an attribute's type, such that one could query for all objects with an attribute "test" whose value is of type Int, irrespective of the actual value.
+
+(And this would also allow for data types like IntQuery, with constructors like GreaterThan Int, LessThan Int, AnyInt, and so on, and then a data type like ValueQuery, with constructors like IntValue IntQuery, StringValue StringQuery, and AnyValue. One could then query for objects with an attribute "test" which matches AnyValue, for example, to get objects that have a "test" attribute, and IntQuery AnyInt to get objects that have a "test" attribute whose value is of type Int.)
+
+I'll leave the list of supported types for later, but I'm thinking they could include Int (although I'll probably use Integer, to support arbitrary precision), Binary (represented as a ByteString), String, and Bool. I might add a floating-point value if I can come up with a good cross-language representation for one. Null values won't be allowed; in cases where one is needed, the attribute should just be omitted altogether. (Schemas will, of course, include a way to specify that a particular attribute is not required, but that if it is present, it is to have such-and-such a type and such-and-such other things as specified by the schema.)
+
+So that's attributes for now.
+
+Now, schemas...
+
+My initial feeling, for simplicity's sake, is to have the schema itself be a bunch of binary data (or textual data; could use read/show for an initial prototype and write a more cross-language solution later) which is generated from some Haskell data types expressing the schema. Then we just have a handful of attributes on schema objects specifying things like the schema's name (a textual description like "filer.commit") and perhaps a description, and then an attribute holding the schema itself.
+
+That sounds good. So, what things should schemas be able to specify?
+
+Well, there should be a way to specify that an attribute with a given name has to exist, with any value.
+
+And there should be a way to specify that an attribute with a given name has to exist and has to be of a certain type.
+
+And there should be a way to specify that an attribute is not required to exist, but that if it does, it has to be of a certain type.
+
+I don't know if I'll put any value constraints on attributes for now, as I don't know that there's really much of a reason to at present.
+
+So that's pretty much good for attributes for now. Now for refs...
+
+The problem with refs is that they almost need their own schemas separate from the object's schema. The point being, one can ask for an object that uses the page schema, and this object should have zero or more refs pointing to other pages, with attributes specifying what link in the page this ref represents. But how do you ask the object for all refs that point to said other pages with the relevant attributes present? This runs into the same problem with a commit object not having things required by commit objects.
+
+And that makes me think that we need a notion of object schemas and ref schemas. Object schemas would specify the attributes necessary on an object, and information about which refs an object must have, which would somehow specify a ref schema that the ref must conform to. Ref schemas would, then, be specifications of what attributes must be present on a ref, and perhaps what sort of object it points to.
+
+When creating an object, then, a schema would be specified for the object, and a schema would be specified for each of its refs. Ref schemas would themselves just be objects.
+
+This presents one problem, and that is that filer's schema would require circular dependencies among schemas: the commit schema would specify that exactly one commit-to-child ref must exist, the commit-to-ref schema would specify that the pointed-to object must conform either to the folder schema or the file schema, the folder schema would specify that zero or more folder-to-child refs must exist, and the folder-to-child schema would specify that the pointed-to object must conform to the commit schema (and that a name attribute, whose value is a string, must be present on the ref). So there's a problem.
+
+One obvious solution would be to allow schema objects to contain multiple schemas, each perhaps with a name, and then allow schemas the ability to reference their own object. Then schemas would be referred to by the hash of the object that contains them and their name, which might represent the attribute of the object on which they're stored. Schemas could then, when referring to other schemas, omit the hash part, which would mean that they refer to the schema object in which they're contained.
+
+Another solution, along similar lines, would be to somehow split schemas out into two separate types of objects. One type would contain individual ref and object schemas, one schema per object, and the second would be an object with refs to every individual schema it includes. The first objects would contain pointers to other named schemas, and the second object would essentially link those all together.
+
+So maybe the first type of object could be called a schema template, and the second type of object could be called a schema group, with the combined whole being called a schema.
+
+Refs from schema groups to schema templates would then specify the name that the template is to assume within the group, and a given schema would not be considered valid if any of its templates referred to names not given to any other templates within the group.
+
+This would solve the circular dependency problem quite nicely, but it's really complicated, and I'm somewhat hesitant to implement it as a result.
+
+There's just too many opportunities for circular schema dependencies that I can think of... More are surfacing when I think about how OpenGroove would work...
+
+So I think, for now, that I'm going to go with the old way of doing schemas, and have ref schemas not specify the type of object that they point to. And then I'll just let runtime errors happen as they happen if it's not the right type of object.
+
+Although I would really like to revisit the problem in the future and see if I can't think of some way to link things up... But I'll worry about that later, and get a prototype working for now.
+
+You know, I might even just let a schema be specified or not for now, and not do any validation on it yet, until I've got all of the other mechanics working first. Then I'll see. Or something like that.
+
+Another idea: proper schema templates, like where schemas are written as template objects, and then other objects can instantiate those into concrete schemas, and so on. I'm getting the idea from Haskell's classes and instances. More thought on this later.
+
+So I'm going to just not have schemas for now, and I'll worry about adding them later.
+
+Attributes are definitely going to have specific data types, though.
+
+Ok so, I need to come up with a way to represent everything relationally, that I can use for the first prototype HashDB backend.
+
+So let's see... We're probably going to need some sort of identifier that's unique both for objects and for refs to store in the attributes table so that we can trace each attribute to the object/ref it applies to... So it turns out SQLite doesn't support indexes, so I need another solution...
+
+Well, let's set up the other tables as if we had unique ids for objects and refs, and go from there.
+
+So I can think of two ways to store attributes of different types. One is to have a table with columns like intValue, stringValue, binaryValue, etc, and have non-relevant columns be null. The other is to have a separate table for each type. I'm leaning toward the first as then queries for, say, ints could be written with a where clause like "intValue is not null and ...", where ... is the int-specific tests. It should make translating HashDB queries into SQL queries much simpler.
+
+That being said, I need to check and see if SQLite will properly use indexes with a bunch of clauses like that...
+
+Things are looking positive... I should probably paste my interactive sqlite3 session here...
+
+Ok, pasted it into technotes/sqlite-session-1.txt.
+
+So, the results are that if I have an attributes table with columns "source" (or whatever I add that points back to the object), and a column "name" and columns "intvalue", "stringvalue", "boolvalue", and "blobvalue", and put indexes on (name, somethingvalue), and then if I convert every ivalue query to a where-clause of the form (name = '...' and value-specific-statements) where the name is injected from the wrapping attributequery and convert int queries to things like (intvalue is not null and intvalue > 42), and then a bunch of value queries are strung together with nested AndV or OrV instances, then SQLite uses indexes for the entire query and doesn't perform a table scan, which is positively lovely. (I suspect that if one mixes AndV and OrV instances, table scans might result, but I haven't tried this out yet.)
+
+So I think I'll go with the one table approach for now.
+
+(From some stuff I've been reading, most databases don't allow indexes on blob columns, so queries against blobs would likely result in table scans. But I can't forsee such queries being used in practice, so I'm fine with that.)
+
+So, now I need to decide about the columns in that table that refer to objects or refs...
+
+Having hashes stored in this table would probably be a bad idea from a performance standpoint, as ints are much faster to index and look up than hashes. But the other thing is, I don't really want to waste extra time looking for matching attributes for refs when I'm querying for objects, which makes me think a sourcetype column should be used, and all indexes on (name, somethingvalue) be updated to (sourcetype, name, somethingvalue). Then clauses that include the (name = '...') bit could include sourcetype = 1 or sourcetype = 2 just before it, for objects and refs respectively. Then we'd know that the results we get back are for objects or for refs, respectively, and then we could have numbering collisions between the two and it wouldn't be a problem.
+
+Yeah, let's go with that.
+
+So, we can store attributes like that. Now, for storing objects and refs...
+
+Let's say we had an objects table, which had two columns, hash and id, with the former being a string containing the object's hex hash and the latter being the object's numeric id, probably assigned with autoincrement or something. (This is SQLite-specific, but I can decide on a better way to do it later for other databases.)
+
+That'd sort objects. Then for refs, let's say we had a table called refs, which had three columns, id, source, and target. id is the ref's unique id. source is the id of the object that the ref points from. target is the id of the object that the ref points to.
+
+Then all of the attributes are stored in the attributes table as per normal.
+
+And then we could have indexes on objects for hash and id, and we could have indexes on refs for source, target, and id, and maybe a few others if they end up speeding things up.
+
+So let's see... We should be able to query for objects (which returns a list of hashes for now; might provide a way to get a list of hashes plus attributes and refs later), query for refs (getting back a list of source hashes, target hashes, and applicable attributes), query for attributes on an object (getting back a map of attributes to their values) and query for attributes on a ref (getting back the same thing).
+
+You know what, I'm going to try to code this up briefly and see how it goes, and then go back to design if it doesn't work.
+
+So things have gone well so far, except now I'm getting rather confused over the query language.
+
+So I need to think about what queries I want to be able to make...
+
+I want to be able to get all objects (in the form of a list of hashes) that have attribute X with value Y and don't have attribute Z with value N and have attribute A whose value is an int less than B and which have a ref pointing to an object C which has attribute D whose value is E, but not a ref with an attribute F on it.
+
+I want to be able to get all attributes from object A whose name is either B or C and whose value, if its name is B, is an int less than 5 or whose value, if its name is C, is a string.
+
+I want to be able to get all refs (which are provided as a from-this-object hash and a to-this-object hash, and a dictionary of attributes) that point from any object that has... basically any object I could query for directly, and/or that points to any object that has... and/or that has a ref X whose value is Y and so on.
+
+
+
+
+Hm, you know what, I've decided I need schemas before I do anything else. And I've worked out a way to do them that's not necessarily ideal but will do for now.
+
+So, I'm going to have schemas be objects that contain four attributes: name, description, objects, and refs. The first is a short, descriptive name for the schema (filer's four schemas will use the names "commit", "changeset", "file", and "folder" (I might use "blob" and "tree", respectively, for the last two; I'm undecided at present)) that will be shown in the future HashDB browser in the space where an object's schema is displayed. The description attribute is a longer description of what the schema is; it is free form, and should contain sufficient information that a similar schema intended for completely different purposes would be unlikely to have the same description and therefore potentially the same schema hash. It should also contain sufficient information to describe the purpose of conforming objects and where one might find programs capable of processing such objects. (Filer's description would contain information indicating what filer is and perhaps that, as of the time when the schema was created, filer's home page is on opengroove.org.) The refs and objects attributes contain the encoded forms of the schemas. (I'll use Haskell's Data.Binary package to do this for now, but I'll likely change this to use something else later.)
+
+Actually, I'm going to call these schema-containing objects schema sets, as they can contain multiple schemas. The point of multiple schemas being contained within the object is to permit circular schema dependencies, which I've discussed before is the problem that made schemas so difficult in the first place.
+
+So, this binary schema set representation thingies that are stored in the refs and objects attributes are maps whose keys are schema names and whose values are object schemas or ref schemas, respectively.
+
+Each object schema contains a number of attribute constraints and a number of ref constraints. All of the constraints must apply; I may add a way to specify a set of constraints such that only one need apply later. But this'll do for now.
+
+An attribute constraint specifies the name of an attribute that it applies to. In the future, I may permit prefixes here, such that one might constrain all attributes starting with "user-" to contain only strings, at a later date. No checks are performed to ensure that the same attribute is not specified twice with conflicting constraints; a schema containing such constraints is perfectly valid, but no object will conform to it.
+
+An attribute constraint also indicates whether the attribute is required. Required attributes must be present and must conform in every other way to the constraint. Optional attributes may or may not be present, but if they are present, they must conform in every other way to the constraint.
+
+An attribute constraint also indicates the type of the attribute. This part of the constraint is optional and, if not specified, conforming attributes may be of any type.
+
+That's it for constraints for now. I'll probably add the ability to impose restrictions on values later (and I might even reuse some of the query datatypes for that purpose, but we'll see.)
+
+A ref constraint specifies a particular ref schema to check, as a combination of a hash and a string. The hash points to a schema set object containing the ref schema, and the name points to a ref schema within the schema set object's refs attribute. The constraint is checked against all refs declared to conform to the relevant ref schema. (This is somewhat different from how I was doing things before: every ref declares a ref schema that it conforms to. Internally, I'll probably store this as a shortish integer pointing to the actual ref schema to avoid having to store an additional 32 bytes per ref for the hash.)
+
+A ref constraint also specifies the quantity of conforming refs that may appear on a conforming object. This is currently specified in a way that somewhat mirrors regular expressions; the reason for choosing this way instead of a simple lower bound and (optionally unspecified) upper bound is that I have future hopes to use Template Haskell for the HashDB library to provide type safety when reading objects from a database that conform to a particular schema, and each type of quantity constraint matches up perfectly with a Haskell data type, namely a, Maybe a, [a], and [a], respectively. The four types of constraints are, and I use Haskell data type declaration syntax: data QuantityConstraint = One | ZeroOrOne | ZeroOrMore | OneOrMore.
+
+So, that's object schemas. Now ref schemas.
+
+Each ref schema specifies a list of object schemas to which conforming refs may point. A conforming ref may point to an object conforming to any of the schemas in the list, or if the list is empty, a conforming ref may point to an object conforming to any schema or to no schema at all. (This allows for, say, filer commits to point to either files or folders, depending on what their content is. Whether a commit contains a file or a folder can be queried by examining the schema that the object pointed to by the commit's commit-to-content ref points to.) These object schema references are declared in the same format as the ref schema references are declared in object schemas' ref constraints.
+
+Each ref schema also specifies a number of attribute constraints, in the same format as that specified on object schemas.
+
+Note that an object schema and a ref schema in the same schema set may share the same name. The two will be distinguished by which of the schema set's attributes ("refs" or "objects") they appear in.
+
+When an object is created, the schema it conforms to is specified in the same way as object and ref schema references are above; that is, as a combination of a hash and a string. Every ref specified on the object also declares, in the same format, the ref schema to which it conforms. Note that object schemas and ref schemas may be omitted when creating objects and refs, in which case the respective objects and refs do not conform to any schema and may contain attributes and refs in any format. Note also that refs declaring a schema may be freely intermixed with refs not declaring a schema on the same object (even an object which does not itself declare a schema) and that, as schemas require certain attributes and refs to be present but do not preclude the possibility of additional attributes and refs being present, additional refs that do or do not conform to a schema may be freely added to an object conforming to a schema insofar as they do not violate the constraints given by the schema.
+
+Ok, I think that looks good.
+
+Oh, one other thing: I'm introducing a new concept which I'm going to call dependencies. An object A depends on an object B if A cannot be inserted into a HashDB without B being present. I've been writing things such that a ref from A to B is sufficient to create a dependency from A to B (i.e. A cannot exist without B present as well), but the concept of schemas introduces an additional mechanism whereby dependencies can be introduced: every object has a dependency on the object containing the schema to which it conforms, and every object also has a dependency on the objects containing the schemas to which each of its refs conform. In the future I might change HashDB such that a ref from A to B does not automatically create a dependency from A to B, but even if I do, schemas will always create dependencies since copying an object from one database to another would nearly always require revalidating the object against its schema as I expect HashDB databases to rarely trust teach other.
+
+Oh, and that reminds me, schema set objects must have a ref pointing to each schema set mentioned in any schemas that they contain. That's all I'm going to require for now (said refs don't have to have any attributes or anything), but I might change that in the future. The point of doing that is to pull along all dependent schemas when a particular schema is pulled from one HashDB to another, so that all information required to validate any given object is present in any HashDB in which the object exists. (And I'll probably have the schema validator fail if a schema mentions another schema that isn't properly referred to, so that if an object conforms to a schema, the schema is guaranteed to be well-formed as well. I'm not yet sure if I'll validate all schemas in a schema set in this way.)
+
+Which is another reason I'm thinking I probably won't get rid of the A to B ref dependency thingie, is because then an incomplete schema could be pulled from one database to another, which would cause validation problems. So I think I'll leave it for now.
+
+I do need to think about how to have partial references in the future, though, as it'd be somewhat nice for web pages, for example, to publish semantic data as sets of HashDB objects referring to other objects that they perhaps don't want to host or don't have the space to host or things like that. In a sense, HashDB could become similar to RDF, but still quite different. But I'll wait until later to think along those lines.
+
+So, that's good for how schemas work. Now I need to think about how I'm going to support them in the HashDB Haskell library.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

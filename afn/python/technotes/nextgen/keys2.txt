@@ -1,0 +1,321 @@
+So I decided to read through the Apple developer docs on KVC, KVO, and bindings, and this has helped a lot and has made me realize that I'm doing a lot of things wrong.
+
+So I need to completely redo how I'm doing stuff.
+
+I also read through the source for GNUStep's implementation of KVC and KVO, which also helped.
+
+So... One major thing that I was messing up on was that I was thinking that KVO was a system provided by Apple that objects could make use of. In reality, it's more an informal protocol; the system provided by Apple is only one possible implementation of it, and developers are encouraged to manually implement the protocol if need be. That means that encapsulation is particularly important; a particular object using my Python implementation of KVO can't expect that any other objects it might use also use the same implementation.
+
+I also found out that a number of methods that I thought were implementation-specific are in fact standardized as part of the protocol. One important example: willChangeValueForKey and didChangeValueForKey. These are called just before and just after the actual change takes place; willChangeValueForKey stores off the key's current value, and didChangeValueForKey looks up the key's new value and fires off notifications as needed. Those are standardized so that code supporting custom... Hm, I want to go read up on NSEditor and NSEditorRegistration before doing anything else, to make sure that I factor their capabilities into this whole system...
+
+Ok, this looks interesting. There's not really a programming guide on how to use it, but basically, things that can be edited provide commitEditing and discardEditing methods, and controllers provide objectDidBeginEditing and objectDidEndEditing methods. Nothing's mentioned about how a particular editor is instructed which controllers to send objectDidBeginEditing and objectDidEndEditing messages do, so I'm guessing that it uses the controller to which it is bound, which I consider somewhat daft as it means that a controller has to be present (and I'm thinking of writing Nextgen UI's components in such a way that controllers only need to be used when certain behaviors provided by them are useful). But either way...
+
+Oh, also, commitEditing can error out if the contents aren't valid for some reason. For example, if a particular text field is bound to a property of a model object whose validator requires that the value be parseable as an int, then committing the text field would fail if the contents had been changed to something that wasn't a valid int. This needs to be factored in.
+
+So the more I've thought about bindings, the more I'm thinking that they really should be completely symmetrical, meaning that binding two properties A and B of two objects together perform the same actions on both, and neither has preferential status as the binder. Setting up a binding between the two would cause an observer to be added to A which, on receiving changes, would push them into B, and vice versa. As part of setting up the binding, one of the two would take on the other's value; I'm thinking that binding A to B would cause A to take on B's value. But that part of the system, the part that copies one's value to the other on creation of the binding, would be the only non-symmetrical part of the system.
+
+Validation is an altogether more difficult topic. The idea would be that in addition to simply having key-value observers, one could also register key-value validators on a particular property; all of a property's key-value validators would be checked against the property's would-be new value, and if any of them rejects the new value, an exception would be thrown and the new value wouldn't be set. Binding A to B, then, would register a validator on A that calls all of B's validators and a validator on B that calls all of A's validators, thereby ensuring that values set into one can be properly set into the other. (Binding A to B would also check that A's validators allow B's current value; if they don't, an exception would be thrown indicating that the binding cannot be established since B's current value is not a valid value for A.)
+
+This would work in theory, but it presents one important problem: it causes an infinite loop. Suppose we bind A to B, and then set A's value. A's delegate-to-B validator invokes B's validators, one of which is B's delegate-to-A validator, which calls A's validators all over again, and so on.
+
+If the order of validator invocation is unspecified, and this sounds reasonable to me, then this could potentially be solved by passing each validator a list of validators that have already been invoked for this property. Any delegating validator would add all of its delegates to the list, and would also skip over any validators already in the list. This sounds like an overly-complex solution to the problem, but it's at least a solution, so I can run with it if need be.
+
+Of course, that brings up the question of how editors should be implemented, and whether there's really a need for listening for when editing has started and when editing has finished. There is definitely still a need to be able to tell an editor to commit or discard its changes, since, for example, saving a document requires the editor representing the document's contents to commit its changes before the document can be saved.
+
+So I just checked on gtk.Entry and it notifies whenever a single character is changed in the text field, which is good because it means I can implement the editor logic on my own. (And that also brings up a good point: I want some sort of property on text fields that reflects the exact character content of the text field at any given time, which, if bound to a property, would cause the property to update as each character were typed.)
+
+So, I've just thought of a use case that I can work with to make sure I get this editor stuff right. Let's say we have a list of dicts, each dict being a person, and the overall list being an address book of people. (Arguably this should be a set, but I'll worry about that later.) Let's say we wanted to create a GUI that shows a list box containing the names of the people and then a number of text fields below it that display and allow editing of the currently-selected person's name, phone number, email address, etc. When text is typed in one of the text fields, it needs to be pushed into the correspondin person's dict, and in particular this needs to still happen even if the currently-selected person spontaneously changes. So when the selected person changes, the edit needs to commit, and it needs to happen before the selection changes.
+
+Hm, I need to come back to that and think about that a bit.
+
+So I also just realized that it's not just key value updates that need to be validated; mutations to lists and sets need to be validated as well. An example of where this would come in useful: a controller that takes a set as input and provides a list as output, showing all the items in the set ordered by some criteria. The controller would allow new items to be inserted into the list and items to be removed from the list, but it would not allow reordering of items, and it would force items to be inserted at particular positions. (Arguably the controller shouldn't even support mutations of the list, and should require that the underlying set be mutated instead, but I'll think about that later.) In this case, the validator would deny attempts to reorder the list. A validator might also want to deny attempts to add invalid values to a list; for example, if a contact's phone number were a list instead of a single text field, each entry should be validated to ensure that it represents a valid phone number.
+
+(And this, of course, opens a whole new can of worms on how to update things in lists, particularly where those things are primitives such as numbers instead of objects themselves, but I'll think about that in a bit.)
+
+So I need to get into the details of how coding and observing work before I even start to get into binding and its bearing upon te GUI.
+
+So... Half of me really wants to have objects, lists, and sets all be distinct constructs, and the other half of me wants sets and lists to be simply aspects of objects like Cocoa does. There are pros and cons to both. Some of the pros of having sets and lists be aspects of objects are that Cocoa's already done the design for us, and it makes performing list modifications easier. There are cons, though, one of the most notable of which is that it makes it quite a bit harder to represent JSON values as observing-compliant objects, since an object with a single property of "value", whose value is a to-many relationship, would have to stand in for a JSON list.
+
+One of the major issues I'm trying to deal with in having objects, lists, and sets all be different is that nested keys within any of them might be of another type, and so all three have to provide methods for performing the mutations of any of those three on keys. In Cocoa, objects provide methods for all three types of mutations; objects, lists, and sets would all have to do likewise. This might not be so horrible, though, as a class providing such methods could be written, but it makes the informal protocol somewhat more complex.
+
+I'm thinking I'm going to work under the model that all three are separate for now, since I like a lot of things about this model. As I develop this model further, I'll think about whether it was a good idea, and switch to the other model if this model becomes untenable.
+
+So I'm thinking all three types should follow the same protocol for key paths, meaning that all three provide methods like set_key_at_path, insert_at_path, remove_at_path, replace_at_path, get_key_at_path, etc. Each type would then provide the corresponding non-path versions for whatever type it is; objects, therefore, would only provide set_key and get_key, not insert. (And I need to think up what names I want to use for these.) A particular Python instance should be able to be all three types at one time; the methods, therefore, need to be named differently so that any given object can provide all three sets of methods. NextgenList, for example, which is a list-like class that will implement KVO, will be both a list and an object; the main property it would publish as an object would be size, length, or count (I haven't decided which one to use yet), which would provide the number of items currently in the list. (Although perhaps this should be something that's part of the list protocol itself, and not published as part of the object protocol...)
+
+Hm...
+
+Yeah, I think a list's size should be published as part of the list protocol itself. NextgenList could also publish it as an object property for things interested simply in the size, but the size should be part of the list protocol itself (and I will probably write a value transformer, which, by the way, are just going to be ordinary objects providing, say, two properties named in and out that can be bound to in order to perform the transformation, that takes a list as input and provides its size as output, for the benefit of those custom list implementations that don't publish their size as an object property). And same goes for sets.
+
+So objects, lists, and sets all implement the key-path versions of the methods of all three, but only the non-key-path versions of the methods of the types that they themselves support.
+
+(And then of course Python list, set, and dict proxies can be obtained that wrap a particular key path on a particular object. These proxies would not themselves be KVO-compliant, same as Cocoa's corresponding proxies are not KVO-compliant, mainly for simplicity. At some future point I might decide to make them compliant, but it's just too complicated right now, and I don't have any really good need for it.)
+
+So let's think of what functions we want to have...
+
+Non path-related functions:
+
+    For objects:
+        Getters (functions that get data from an object):
+            get_value_for_key(key) -> value
+        Setters (functions that change the data held in an object):
+            set_value_for_key(key, value)
+    For lists:
+        Getters:
+            size_of_list() -> list size, as an int (or a long)
+            get_list_value(index) -> value; index is zero-based
+        Setters:
+            insert_list_value(index, value)
+            remove_list_value(index)
+            replace_list_value(index, value)
+    For sets:
+        Getters:
+            size_of_set() -> set size
+            get_set_iterator() -> iterator yielding the set's values
+            member_of_set(value) -> boolean indicating whether value is in the set
+        Setters:
+            add_set_value(value)
+            remove_set_value(value)
+
+I think the path-related functions are going to basically be the same as the non path-related functions with an additional path parameter, but let's see...
+
+Hm, I just realized this needs some additional thought. When adding to a list, what path does one specify? Is it x/y/* or just x/y?
+
+Well...
+
+Expanded paths (expanded paths are the list equivalents of paths; the path x/y/* would be converted to the expanded path [Key("x"), Key("y"), Index(None)]) contain enough information to be able to tell whether the thing we're currently targeting is an object or a list or a set. So how would we do this...
+
+Let's say we have {"x": {"y": [{"a": "i"}, {"a": "j"}]}}, and we want to add {"a": "k"} to the list at x/y. If we want to observe the property containing the list and get notified whenever a different list instance is set into y, but not when the contents of the list actually change, we would observe x/y. If we wanted to observe the list's contents and know when new things were added to the list or removed from the list, we would observe x/y/*. So it makes sense that if we wanted to replace the current list object, we would use x/y, and if we wanted to insert a new item into the list, we would use x/y/*. So how would this be implemented?
+
+Well, we tell our root object to go insert our new value into x/y/*. It sees that x is a key, and so invokes its own get_value_for_key, passing in that key, and instructs the result to insert the new value at the path y/*.
+
+This object, which is the one that has y as a key, sees that y is also a key, and does the same thing, with the result that it gets the actual list object and tells it to insert the new value at the path *.
+
+The list, then, sees that the insertion is to be performed on *, and that this is the only component of the path. It therefore knows that the insertion is to be performed on itself, so it duly performs the insertion.
+
+This sounds good.
+
+Now let's imagine that the list was a list of lists, and we wanted to add our value to each of these sublists. (Cocoa KVC dictates that if one mutates through a to-many relationship, all items in the relationship receive the same mutation, and I'm going to follow that as well.) So we insert at x/y/*/*. This follows the same protocol as mentioned above until we get to the root list. Its path-related insert method notices that the current path contains more than one item, so it gets all the list items (the only valid path that can be specified for a list is *, which corresponds to Index(None) (since I'm not currently allowing any list paths that have to do with particular indexes; cocoa does much the same thing by not allowing any list-related path components), so the only valid thing it can do is get all the items in the list) and then iterates over each one and asks them to insert the value in question at the path *. These lists then process the request in much the same way that our root list did when we were just inserting into x/y/*.
+
+And, of course, if we want to insert a whole new list into our list of lists, we can do that by inserting into x/y/*, since the root list will notice that the path only contains *, so it will perform the insertion on itself.
+
+Ok, I like how this is shaping up.
+
+Sets would basically be done in the same way.
+
+So given that, let's see what methods we're going to have... (Oh, and object-related ones don't need a key since they can derive it from the path, and sets don't need an index or anything since they don't care about the location; lists, however, still need their explicit index, which is fine.)
+
+Path-related functions:
+
+    For objects:
+        Getters:
+            get_value_for_key_path(path) -> value
+        Setters:
+            set_value_for_key_path(path, value)
+    For lists:
+        Getters:
+            size_of_list_at_path(path) -> list size
+            get_list_value_at_path(path, index) -> value
+        Setters:
+            insert_list_value_at_path(path, index, value)
+            remove_list_value_at_path(path, index)
+            replace_list_value_at_path(path, index, value)
+    For sets:
+        Getters:
+            size_of_set_at_path(path) -> set size
+            get_set_iterator_at_path(path) -> iterator yielding the set's values
+            member_of_set_at_path(path, value) -> boolean
+        Setters:
+            add_set_value_at_path(path, value)
+            remove_set_value_at_path(path, value)
+
+I believe I just did it. All of these methods make perfect sense.
+
+So, all KVC-compliant things must implement every path-related function, regardless of what sort of thing they are. Then they only need to implement the non path-related functions corresponding to what sort of thing they are. I'll provide a class that implements the path-related functions using the system I described above; most classes will be able to extend this class and thus only have to worry about implementing the non-path-related functions.
+
+So now, the observing protocol.
+
+We need to be able to observe a particular path for changes. The change notifications that we receive will be specific to the type of the last item in the path. (And I'm thinking that if said item doesn't support the type that the relevant path component indicates, then for lists, they should appear empty, same with sets, and for keys, they should appear null, or something; this needs thought).
+
+So let's see... How does GNUStep implement observing paths with more than one component in them?
+
+Oh for... It uses these forwarder things that appear to be hopelessly complicated. It does, as I expected, register observers (namely the forwarder) on the values of the keys in the path, so, given a, observing x/y/z causes two observers to be registered: one on a observing x, and one on a.x observing y/z. Whenever the first observer is triggered, it removes the second observer from the old value and installs it onto the new value. Whenever the second observer is triggered, it notifies the original observer that changes have happened.
+
+The one thing I haven't found is how it handles observing through lists. Meaning, for example, to put this in Python's terms, what happens if an observer is added to a/*/b? My thought would be that... Actually, using the above coding logic, what would even happen if I tried to ask an object for the value of the key a/*/b?
+
+You know what, I never went through the semantics of actually getting things instead of setting them.
+
+So I just went through the semantics and they're rather less advanced than I expected them to be, but I'm not going to complain, because if they pulled it off then theoretically I can as well.
+
+So, their semantics: observers can't observe through to-many relationships. Attempting to register such an observer causes exceptions to be thrown.
+
+So the Python thing doesn't need to be able to do this either.
+
+However, it needs to not throw exceptions; it needs to do something else sensible instead; what, I'm not exactly sure.
+
+And I need to maintain encapsulation, too, but I still want as much code as possible to be reusable throughout the KVO implementations for lists, objects, and sets.
+
+So Cocoa has willChangeValueForKey: and didChangeValueForKey: which are called just before and just after the key's value is to be changed. NSObject provides these methods, as well as addObserver:forKeyPath:change:context:. When an observer is added, it tracks it internally; when willChangeValueForKey: is called, all observers that have requested to receive prior notifications are sent such notifications and the current value of the key is stored; and when didChangeValueForKey: is called, all observers are notified, specifying the stored-off value as the old value and the property's current value as the new value. (This, of course, means that we need to keep track of a thread-local stack of properties that are in the process of being changed; calling willChangeValueForKey: pushes an entry onto the stack, and calling didChangeValueForKey: pops the most recent entry off the stack, checks it to make sure that the keys match (throwing an exception if they don't), and sends out observation notices.
+
+Cocoa also has willChange:valuesAtIndexes:forKey: and didChange:valuesAtIndexes:forKey:, which are called under the same circumstances but when a list modification is taking place; the first argument is the type of change (insertion, removal, or replacement), the second argument is a list of indexes that the changes relate to, and the third argument is the key of the to-many relationship in question. The equivalents for sets, willChangeValueForKey:withSetMutation:usingObjects: and didChangeValueForKey:withSetMutation:usingObjects:, is also present; the first argument is the key, the second argument is the modification that is being performed, and the third argument is a list or set of objects that will be given to the modification.
+
+Then there's a method automaticallyNotifiesObserversForKey:. If this returns true for a particular key, Cocoa KVO will override the property setters and make them call willChangeValueForKey: and didChangeValueForKey before and after updating the property. It will also override setValue:forKey:, insertObject:inKeyAtIndex:, etc. and so on, and make them call willChangeValueForKey/didChangeValueForKey, willChange:valuesAtIndexes:forKey:/didChange:valuesAtIndexes:forKey:, etc.
+
+So I'm going to get back to all this in a second. I've been thinking about this and I realized that I have a major problem with implementing bindings using this system: it creates observation loops, which will result in an infinite loop whenever the value of any bound property is changed. That is not good.
+
+To demonstrate, imagine that we have three objects, X, Y, and Z, which have properties A, B, and C, respectively. A is bound to B and B is bound to C. Something changes C; this causes a KVO observation to be issued, and B's binding to C receives that and updates B's value accordingly. B then issues its own KVO observation, which C's binding to B picks up, and updates C, thereby causing C to issue another observation, and so on in an infinite loop.
+
+Cocoa avoids this by having bindings be one way only and requiring one of the sides, usually a controller class such as NSArrayController, do the heavy lifting by implementing its code to push changes out without using KVO. This, of course, means that simple properties can't be bound together in Cocoa.
+
+A potential solution to this problem for the case of binding keys would be to have the KVO system check to see if setting a property's value actually caused the value to change, and not issue observations if the value hasn't. C would then issue an observation, which would be picked up by B. B would then issue an observation which would cause B's new value to be set on C, but since C already has that value, it would do nothing. B would then go on to notify A, which would update its value and notify B, which would attempt to update its own value and notice that they're the same and so refrain from passing on the notification. No more notifications would be propagated until the next time one of their values was updated.
+
+This also works with sets; additions check to see that the specified items aren't already in the set and removals check to see that the specified items are actually present in the set and haven't already been removed.
+
+The problem is lists.
+
+An item can legally appear more than once in a list, so we can't refuse to pass on notifications simply because an item is already present in the list as the correct thing to do may very well be to add that item again.
+
+So that solution, elegant though it may be, won't work.
+
+So we need to think of another one.
+
+There's only one viable solution that I can think of right now, and it's not elegant at all. But it would work.
+
+That solution is to maintain a thread-local stack of modifications that are currently in progress, and then refuse to modify a particular property as a result of a particular observation if that property is already listed on the thread-local stack as having been modified.
+
+And now that I think about it, that might have issues with causing list duplicates in the property that was changed by an outside source, so even it might not even work.
+
+Let's see how this would work with just A and B�
+
+(Also, when I refer to observer AB, I mean the one observing A that will push changes with KVC to B. Likewise, observer BA observes B and pushes changes to A.)
+
+A is modified, and AB is notified. AB adds A to the stack of things that are being modified, then updates B. BA is triggered and adds B to the stack, then goes to update A, but notices that A is already on the stack. It therefore skips notifying A. Since it's finished updating things, it removes B from the stack, then returns. Back in AB, the update of B has finished, so it's done updating; it then removes A from the stack and returns.
+
+So that worked. Now let's try thinking about this as a list, and let's also have the above-mentioned A, B, and C scenario, so there are three things instead of two.
+
+So A, B, and C are lists, and they're currently empty but we want to add the number 42 to them. So we go add 42 to C.
+
+This causes an observation to be sent to CB. CB adds C to the stack, then adds 42 to B.
+
+B then issues an observation to BA. BA adds B to the stack, then proceeds to add 42 to A.
+
+This causes an observation to be issued to AB. AB adds A to the stack, then sees that B is already on the stack and returns, removing A from the stack.
+
+Back in BA, the insertion of 42 into A is done, so BA removes B from the stack and returns.
+
+The update of B isn't yet over, as it has two observers: BA and BC. BC is now notified.
+
+BC adds B to the stack, then notices that C is already on the stack, so it skips updating C and removes B from the stack, then returns.
+
+Back in CB, updating B is now done, so CB removes C from the stack and returns.
+
+That worked perfectly fine, and no duplications happened. I think this will work after all.
+
+Verifiers could work the same way. I think I mentioned before that I'm planning on having a system for registering verifiers for a particular property; binding A to B could register verifiers on both A and B which run the others' verifiers in turn. These verifiers would make use of a context stack in the same way as the observers would.
+
+For simplicity, however, I'm not going to worry about verifiers for now. I'm going to write the system as though verification didn't exist, and then I'll think about how to properly implement it later.
+
+So now back to the KVO and KVC stuff.
+
+So, a class that wants to implement a custom storage mechanism for, say, a dictionary, and that wants it to be observable, would only need to override set_value_for_key and get_value_for_key... Hm, just realized that the subclass implementation is going to override the superclass implementation, which won't work...
+
+That might mean I would need to monkey patch objects when observers are added to them, which I would really rather not do.
+
+Although... There is a possibility I could override __getattribute__ and have it wrap set_value_for_key and return the wrapped version. That might work.
+
+Actually, I need to see if super(...).__getattribute__ works properly...
+
+It does. I just don't like this whole idea... It seems hackish... Although so does isa-swizzling, which Cocoa has no problem using to implement KVO...
+
+I guess I'll have to run with it for now.
+
+So this particular bit watches for requests to get the attribute set_value_for_key and provides a wrapper method around whatever super(..., self).__getattribute__("set_value_for_key") returns. The wrapper calls will_change_key, then calls the underlying set_value_for_key implementation, then calls did_change_key.
+
+And likewise, the list version of this whole thing overrides insert_list_value, remove_list_value, and replace_list_value, and has them all call will_change_list_value and did_change_list_value first. The set version of this whole thing also overrides add_set_value and remove_set_value and has them call will_change_set_value and did_change_set_value beforehand.
+
+Then there's another thing that one can include, which overrides attempts to set properties for which automatically_notifies_for_key returns true. I'm not sure what the default behavior will be if that method isn't present.
+
+So then there's the main thing that's a bit higher up that actually provides will_change_key and did_change_key and so on. I'm still trying to decide: should one class provide all six methods (two each for objects, lists, and sets), or should there be a separate class for each one?
+
+And I just ran across another problem: there needs to be a default implementation of set_value_for_key that will set the corresponding attribute, but if I'm not careful, that will cause the __setattr__ logic to trip, which will cause the object's observers to be notified twice.
+
+Hm, how does Cocoa deal with that?
+
+I think I need to go to bed for tonight and think some more about this tomorrow.
+
+So I think I already wrote some stuff about this on another machine that I haven't pushed from yet, and I'm trying to remember what I wrote...
+
+And I'm not even sure if I wrote anything, but still...
+
+So I'm thinking that ordinarily, you need to call will_change_key and did_change_key from every setter as well as from set_value_for_key. There will, however, be two classes that can be mixed in: the first will provide a __getattribute__ that checks to see if the requested attribute is "set_value_for_key", and if it is, it will return a wrapper around super(...).__getattribute__("set_value_for_key") that calls will_change_key and did_change_key before calling it, and the second will provide a __setattr__ that calls will_change_key and did_change_key before and after setting any attributes. Then, of course, there's a default implementation of set_value_for_key that can be provided in some other class, which basically just delegates to __setattr__ (and this also provides get_value_for_key); if this class sees that the object in question subclasses from the second class as well, it will set (and then clear) a thread-local flag somewhere indicating that the __setattr__ provided by the second class is not to invoke notifications. This needs some more thought to make sure I'm not overlooking anything, but on the whole, I think it could work.
+
+There aren't any default implementations of the list and set methods except for NextgenList and NextgenSet themselves. (There's also an object-like class called NextgenDict that provides the object protocol.) There are, however, classes corresponding to the first class mentioned above, the one that uses __getattribute__ to override set_value_for_key, that override all of the list and set modifiers and cause them to invoke will_insert_list_value, did_insert_list_value, will_remove_list_value, did_remove_list_value, will_replace_list_value, did_replace_list_value, will_add_set_value, did_add_set_value, will_remove_set_value, and did_remove_set_value, respectively. NextgenList and NextgenObject may or may not subclass from these classes, I haven't decided yet.
+
+I am somewhat tempted not to write any of these utility classes to start with, and get the underlying system working before writing them. That way I have something that works to start off with.
+
+So in that case, we'd just have the class or classes that provide the base coding and observing layer. I'm thinking I'm going to do those as two separate classes like Cocoa does if I can manage it. The Coding class would provide all of the methods such as set_value_for_key_path, get_value_for_key_path, insert_list_value_at_path, and so on. The Observing class would provide both the public-facing methods (add_observer_for_path most notably) and the private-facing methods (such as will_change_key, which I'm thinking I might rename to will_set_value_for_key for naming consistency); it would track the observers added by add_observer_for_path, register any observers on child objects that it needs to (in case the path has more than one element in it), and notify observers whenever the will_... and do_... methods are called.
+
+Ok, I have that all resolved now. So there's one big thing to think about now: I mentioned that unlimited nested keys should be observable, but only one layer of list and set should be. What happens if we violate that by observing, say, */*/*, or what happens if we observe a list when that list is actually an object?
+
+So I'm thinking that the last thing in the path should govern what types of events we observe, and perhaps if something is not observable along the way (or it gets set to null, since None definitely isn't observable) or we're observing the wrong type, we either see a key be removed if it's a key, list items disappear if it's a list, or set items disappear if it's a set. Another way to do it would be to have an observation change called NotApplicable or something that's fired to indicate that a key is missing or we're observing the wrong type or something like that, which could be used to similar effect as Cocoa's bindings' support for the not applicable marker.
+
+(Also, noting: apparently the default implementation of setValue:forKey: doesn't call willChangeValueForKey: and didChangeValueForKey: automatically; only the setX:, setY: etc methods do that. That explains how they avoid double notifying things.)
+
+So I need to go see what happens when a Cocoa thing gets set to null and then we observe it. I believe that when we try to observe it and it's currently null, we get an exception, but I don't know if this is the case if we're already observing it and then it gets set to null...
+
+So I just checked, and when this happens, an observation saying that the path was set to null is issued. This sounds like it's going to screw with bindings, if a binding to a list gets a key-related message, so I think I'm going to either have some sort of NotApplicable marker or have all of the list's items appear to be removed. The question is which one to do.
+
+I'm tempted to do with the NotApplicable idea, and then have the binding system de-sync whenever a NotApplicable marker comes in. By that, I mean that if one side of the binding goes to NotApplicable, the other side doesn't receive any changes... There are problems with that, though...
+
+Maybe I should try this out and see what happens...
+
+Hm, I don't have access to a machine that I can try it out on right now. So what should I do...
+
+I'm sort of tempted to just try Cocoa's way of issuing "this key was set to null" events when something like this happens under the assumption that something like this /won't/ typically happen, and then let the bindings stuff throw exceptions when this happens and it wasn't expecting it. I think that's reasonably sane for now.
+
+Man, this whole thing is really complicated... There /has/ to be a simpler way to do it...
+
+I was thinking, what if I scrapped paths and just had two objects be bound together, but then I realized that has two problems: 1, that wouldn't allow for binding just individual keys of objects together, and 2, this would completely mess up the whole idea behind list controllers: you would want to be able to bind to controller/selectedObject/... which would allow you to edit the currently-selected object, but if we don't have a notion of paths, then that won't work because the various editing-related things (text fields etc) would end up bound to the first selected object but not follow the new selection when the selection changes.
+
+Of course, that makes me think that maybe path-based binding should be implemented as a separate controller class, such as PathController, which allows you to bind to a particular path of a particular thing, and it will handle everything else. But that seems like it would make it overly complicated to actually use the resulting system...
+
+(And, of course, I've been thinking a lot about replacing the whole path idea with JPath tracing/reverse queries (which are another thing I was thinking of that would be queries that use KVO to keep their results updated as their input data changes, and also change their input data as their results change, which would basically be a replacement for the whole bindings system anyways) which would be cool, except that I think the tracing engine is going to take a huge amount of work to write.)
+
+Ok, I'm just going to implement this like cocoa, and if we're observing a list at a particular path, and somewhere up the path the key goes to null, then we'll get a key event for that observer saying that the value just went to null.
+
+Not necessarily optimal, but it'll do for now.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,114 @@
+THIS FILE CONTAINS THE CURRENT ALLOCATION OF X10 ADDRESSES IN ALEX'S HOUSE. IT
+IS AUTHORITATIVE; IF YOU NEED TO ALLOCATE SOME ADDRESSES, SIMPLY EDIT THIS FILE
+AND MARK DOWN THE BLOCK AND/OR ADDRESSES YOU NEED.
+
+Addresses marked TBD are currently in use by a module that Alex can't currently
+remember what it is. Addresses or ranges left blank are unallocated. If you
+only need a small block of addresses, feel free to subdivide larger blocks as
+needed.
+
+A 01-08: Modules
+	A1: Alex's ceiling fan
+	A2: Outlet behind Alex's bookshelves
+	A3: Alex's bedroom light
+	A4:
+	A5: Carly and Madi's bedroom light
+	A6: Hallway light (soon to be changed to A7 for historical reasons)
+	A7:
+	A8:
+	
+A 09-15:
+
+B 01-08: Modules (soon to be unallocated and addresses merged into A)
+	B1: 
+	B2: 
+	B3: 
+	B4: Lights in the playroom where the Nintendo and PS2 are
+	B5: Light in front of the living room and the mudroom
+	B6: 
+	B7: 
+	B8: 
+
+B 09-16:
+
+C 01-08: Chimes
+	TBD
+
+C 09-16:
+
+D 01-08:
+
+D 09-16:
+
+E 01-16:
+
+F 01-08:
+
+F 09-16:
+
+G 01-16: Cameras
+	G1:
+	G2:
+	G3:
+	G4:
+	G5:
+	G6:
+	G7:
+	G8:
+	G9:
+	G10:
+	G11:
+	G12:
+	G13: Family Room SW (above the front door)
+	G14: Hallway West (right below the interior window)
+	G15: Upper Stairway (above the window seat facing down the stairs)
+	G16:
+
+H 01-08:
+
+H 09-16:
+
+I 01-08:
+
+I 09-16:
+
+J 01-08:
+
+J 09-16:
+
+K 01-08:
+
+K 09-16:
+
+L 01-08:
+
+L 09-16:
+
+M 01-08: Motion Sensors
+	TBD
+
+M 09-16:
+
+O 01-08:
+
+O 09-16:
+
+P 01-08: Controllers
+	TBD
+
+P 09-16:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

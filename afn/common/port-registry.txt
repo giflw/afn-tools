@@ -1,0 +1,51 @@
+This file contains information about what ports are being used for what
+services throughout the AFN server cluster.
+
+phenoxydine:
+	22     SSH
+	80     Public-facing website. This runs www.opengroove.org, and is run by Cherokee.
+	5222   Openfire XMPP client
+	5269   Openfire XMPP server-to-server
+	6227   ZNC. This is the IRC port for actually connecting to ZNC.
+	6228   ZNC web administration interface
+	8032   SuperTunnel. Cherokee proxies over to this for www.opengroove.org/supertunnel/.
+	8034   SVNWeb. Cherokee proxies over to this for www.opengroove.org/static.
+	8073   Tomcat. Cherokee proxies over to this for any unknown page on www.opengroove.org.
+	8100   Apache. Right now the only thing running on this is FreePBX.
+	9090   Openfire web administration interface
+
+spiro:
+	22     SSH
+	3690   Subversion. This is the official AFN subversion repository.
+	4713   PulseAudio. This plays on the stereo system.
+	8690   ViewVC (SVN web viewer) pointing to the AFN subversion repository
+	28862  Autobus. This is the AFN network's Autobus server.
+
+aster:
+	22     SSH
+	4713   PulseAudio. This plays on the P.A. system.
+	6600   MPD (Music server). Use a client program such as GMPC to connect and play music.
+
+homeschool1:
+	22     SSH
+	5800   VNC web server (I.E. http://homeschool1:5800 will pull up VNC in a browser)
+	5900   VNC server. 5800 and this port are run by an instance of TightVNC.
+	8083   Streaming video for the security camera system
+	8093   Public-facing streaming video for the security camera system. Normally, there's
+	       nothing running on this port. VLC, which serves 8083, can be switched to this
+	       port temporarily. Make sure you know what you're doing as this ends up being
+	       web-visible at www.opengroove.org/cameras.
+
+sunstone:
+	80     Public web interface for configuring the telephony adapter
+
+router:
+	80     Public web interface for configuring the router
+
+
+
+
+
+
+
+
