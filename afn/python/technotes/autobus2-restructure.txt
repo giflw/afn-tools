@@ -1,0 +1,173 @@
+So I'm thinking about restructuring some of Autobus 2.
+
+The first bit I want to restructure is the discovery system. It knows too much about the bus at the moment; this really needs to be changed to be more along the lines of how publishers work, which is that they have essentially no knowledge of the bus. The idea is that multiple busses could use the same discoverer if that's what was desired.
+
+So I'm thinking discoverers should have methods such as add_listener and remove_listener that add and remove listeners that listen for discovery events to happen. The listener would probably just be a function for now. It would accept parameters specifying what happened and such.
+
+Adding a discoverer to a bus would cause the bus to add a function to the discoverer as a listener. Closing the bus would remove said listener.
+
+I still need to figure out how to do resource management, namely how to ensure that discoverers are properly closed when they're no longer needed. Perhaps they could have a close method; Bus objects could then have a method for adding a discoverer in such a way that it would be automatically closed when the bus itself is closed.
+
+So, the second thing I want to change is that I want services to be implemented as instances of some sort of abstract Service class. Since there's already a Service class that does other things related to services, I might call this class ServiceProvider for now.
+
+The idea would be that a ServiceProvider provides methods for asking it what functions, events, and objects it provides. It would provide functions for actually calling service functions and functions for getting an object's value. It would also provide functions for adding/removing listeners that listen for creation of functions, adding/removing listeners that listen for event firings (and probably event creations/deletions too, for the sake of publishing their information on the introspection service), and adding/removing listeners that listen for object creation/deletion/value changes. Perhaps there might just be one type of listener that's notified when any of those things happen.
+
+Then there would be an implementation of ServiceProvider that accepts a Python object and bases its information on that. The python object could expose traditional Python functions. It could also have instances of AutobusEvent or some such thing, which would be a callable that, when called, notifies its listeners that an event happened; the Python service provider would register listeners on all of the underlying object's events. (Perhaps the event framework should be written separate from Autobus, as it'd be useful elsewhere; I seem to recall I might have already written such a framework that could be used.) Instances of AutobusObject could also be present; this would be a class-level construct acting as a descriptor, under my current plans. Thus one could simply assign a value to the object's corresponding property, and everything would be notified correctly.
+
+Or even better, the Python object would be required to mix in a class that would override __getattr__ and __setattr__ and handle events, functions, and objects correctly. That would allow creation of new objects and events after the service has already been published.
+
+Then that makes me think that it might be even better to just have a mix in class that turns a plain old Python object into a service provider. The only issue is that ServiceProvider's methods would need to be named in such a way as not to conflict with methods that would be used on the actual object, which might prove difficult as that basically obviates everything not starting with an underscore.
+
+I could, of course, break python rules and start adding double underscore methods...
+
+It might be possible to have a __autobus_service__ method that returns a service provider object.
+
+But then two separate objects have to be created, one that's the actual object and one that Autobus uses as the service provider. That's something I don't particularly like.
+
+Although Python's iterator protocol has gotten away with it; you have a list, or a dict, or whatever, and then you have the iterators that iterate over it. So it might be doable.
+
+Perhaps I should come up with an interface for service providers first, and then worry about implementing one in terms of a Python object later.
+
+So, let's say we have these methods:
+
+    call_function(name, args): Calls the specified function, and returns its value.
+    add_listener(listener): Adds the specified listener to this service provider.
+    remove_listener(listener): Removes the specified listener from this service provider.
+    
+Listeners would have a signature listener(event, *args), where event is one of the following constants (which would probably be in a module such as autobus2.constants):
+    
+    FUNCTION_ADDED: A function was added. Two arguments, name and info, will be passed. Info is a dict {"doc": ..., "type": {"args": ["int", "boolean", "any", ...], "return": "none", "remainder": null}}. I'll write more about the type dict later. NOTE THAT THE DICT PASSED MUST NOT LATER BE ALTERED; functions will typically want to assemble the dict, and the dicts it contains, when issuing FUNCTION_ADDED, or use Python's copy.deepcopy function to copy everything.
+    FUNCTION_UPDATED: A function's info dict changed. Two arguments, name and info, will be passed, where info is the function's new information. The same warning present on FUNCTION_ADDED about modifications applies here.
+    FUNCTION_REMOVED: A function was removed. One argument, name, is passed.
+    EVENT_ADDED: An event was added. Two arguments, name and info, will be passed. Info is a dict {"doc": ..., "type": {"args": ["int", "boolean", "any", ...], "remainder": null}}.
+    EVENT_UPDATED: An event's info dict changed. Two arguments, name and info, will be passed.
+    EVENT_REMOVED: An event was removed. One argument, name, is passed.
+    EVENT_FIRED: An event was fired. Two arguments, name and args, are passed.
+    OBJECT_ADDED: An object was added. Three arguments, name, info, and value, will be passed. Info is a dict {"doc": ..., "type": "int"}.
+    OBJECT_UPDATED: An object's info dict changed. Two arguments, name and info, will be passed.
+    OBJECT_REMOVED: An object was removed. One argument, name, will be passed.
+    OBJECT_CHANGED: An object's value changed. Two arguments, name and value, will be passed.
+    SERVICE_UPDATED: A service's info dict changed. One argument, info, will be passed. Info is a dict {"doc": ...}. (This was added later; see a few paragraphs below.)
+
+That sounds absolutely spiffing.
+
+And in fact, most of the functionality is in the form of events issued back to the listener, with only three actual methods that the service provider needs to implement. 
+
+So it might be feasible to break Python's rules and use double-underscore methods.
+
+So, how about __autobus_call__, __autobus_listen__, and __autobus_unlisten__?
+
+Then one could mix AutobusService into a Python class and get automatic __autobus_call__, __autobus_listen__, and __autobus_unlisten__ support.
+
+That would be super awesome.
+
+And then you just pass the object into create_service, and you're good to go.
+
+Man, I like this a lot better than having an Autobus-managed Service class like we've got right now. Service would still be present; it'd just be a wrapper around a ServiceProvider instance that would include information like the service'd id and info dict.
+
+So I'm trying to decide how to obtain the service's documentation...
+
+I'm thinking that it should also be provided by the service provider, since it would typically come from the actual class's docstring, but it should be changeable, since function, event, and object docstrings can be changed as well, if the service provider wants to.
+
+So I've just added a new event, SERVICE_UPDATED. This is used to let the service know that the doc, as reported by the service provider, has changed.
+
+So when a listener is added with __autobus_listen__, the service provider should fire one SERVICE_UPDATED to specify the doc (which will default to None if SERVICE_UPDATED is never called), and one FUNCTION_ADDED, EVENT_ADDED, and OBJECT_ADDED for every object currently available on the service provider. These should be fired synchronously, before __autobus_listen__ returns.
+
+Similarly, __autobus_unlisten__ should fire FUNCTION_REMOVED, EVENT_REMOVED, and OBJECT_REMOVED to remove all functions/events/objects that the listener was previously made aware of. It doesn't need to fire SERVICE_UPDATED.
+
+This is absolutely lovely.
+
+One note that should be obvious but is worth reiterating: a single ServiceProvider can be used with multiple services at the same time. I don't see a practical use for that right now, but I want it to be a possibility just in case.
+
+(And I'm also thinking the future Python object implementation thingie of ServiceProvider will allow both functions assigned directly to the object instance and functions defined on the object instance's class, and will expose both as functions, with the usual Python precedence (instance overrides class) applying.)
+
+So, when a Service is constructed, it sets up all its connection mumbo jumbo, then registers itself as a listener on the service provider passed to it. When changes happen, it updates things and sends out protocol messages as needed. When a remote tries to call a function, it passes the call to __autobus_call__.
+
+Service handles multiple listener dispatch internally; it only ever registers one listener using __autobus_listen__ no matter how many clients there are, or so I'm thinking right now. I might change that later if I decide to do away with the Service class altogether.
+
+So, let's go write up ServiceProvider.
+
+Well, that was simple.
+
+Oh yay! I did already write an event framework! It's afn.utils.listener.Event, and it'll work perfectly for Autobus.
+
+Shoot. I just realized that with all of this service provider stuff, I totally overlooked how Service is supposed to add synthetic functions and objects to itself to provide a list of functions, events, and objects that actually exist.
+
+But it's three in the morning, so I think I'm going to go to bed for now so that I can be up for work tomorrow.
+
+Ideas: inject the object manually, then fire the relevant listener to add the function. The problem: that doesn't allow for injecting functions because the function would delegate to the provider, which obviously wouldn't know about that function. Another idea: write a ServiceProvider that allows merging two ServiceProviders together; More complex, and maybe not the right approach, but it would work; this needs some thought. Yet another idea, very suboptimal but would work: have a single introspection service for a given Bus instance, and have that publish information about the service. I've mentioned elsewhere why I don't like this approach (and I've already partially implemented it but largely abandoned it), but it could work if I can't think of anything else to do.
+
+So another alternative I'm thinking of is to make messages indicating function creation, removal, updating, and so on for events and objects first-class protocol messages. It would make the protocol a bit more complicated, but it would solve the entire problem.
+
+But it would make the protocol more complicated. A lot more complicated, and that would mean the whole thing would be harder to implement. So I think I'll skip that idea.
+
+So I'm liking the idea of a separate introspection service the best, and not just because it avoids the logic needed to add additional functions to a service: it also means that, if I play my cards right, I might not have to implement any special features or special object modifications to make it work.
+
+Here's the idea: a service provider of some sort is created and installed on a bus in such a way that it is notified whenever a service appears or disappears, or is modified. It publishes the relevant objects and methods needed to expose introspection data. No services exist yet, so this can be set on the bus normally. Then a service is created, using the aforementioned service provider, and published via the bus. Publishing the service causes the introspection service provider to update its objects, which delegate straight back to the service being published. Provided the step of notifying the introspection service provider that things have changed is completed at the very end of service setup, so that the service is in a state where it can be safely modified, then this will work, and no special procedures need to be followed to set things up.
+
+Ok, I really like that. I think I'm going to run with it for now.
+
+So I think the service should publish one object per service named details.<service-id>, where <service-id> is the id of the service. The value would be the current value of the per-service autobus.details object. Another object would also be published, details, which is a map; its keys would be the ids of the services, and its values would be the relevant service objects.
+
+That sounds peachy dandy. I think I'm going to go try implementing that.
+
+Hm, quick note: I'm thinking the bridge between the bus and the introspection service provider should also be event-based, which would also allow outside code to listen on a bus for local services being published. The publishers in the discovery module could later be converted to just use that system.
+
+Either that or I could have the bus itself implement the service provider protocol, with the service it provides being the introspection service. It could then register a service on itself. That would remove one layer of event listening, which would simplify the code.
+
+I think I'll try that for now.
+
+Although I might decide to go to bed instead, as yet again it's 3:28 AM. (It's the early morning of Friday, July 13, 2012, if anyone's curious. Friday the 13th...)
+
+So I got everything working, and it works wonderfully. Except I'm sporadically having this exception:
+
+Exception in thread autobus2.remote.Connection._connect-initial:
+Traceback (most recent call last):
+  File "/usr/lib/python2.7/threading.py", line 552, in __bootstrap_inner
+    self.run()
+  File "/usr/lib/python2.7/threading.py", line 505, in run
+    self.__target(*self.__args, **self.__kwargs)
+  File "/home/jcp/workspace/afn/afn/python/src/autobus2/remote.py", line 91, in _connect
+    s.settimeout(None)
+  File "/usr/lib/python2.7/socket.py", line 224, in meth
+    return getattr(self._sock,name)(*args)
+  File "/usr/lib/python2.7/socket.py", line 170, in _dummy
+    raise error(EBADF, 'Bad file descriptor')
+error: [Errno 9] Bad file descriptor
+
+which occurs when I use autosend with a rather small timeout in list mode. But I don't usually do that, so I'm not hugely worried. And it's in a separate thread, and appears to only happen at shutdown time, so it's not an issue I'm going to worry about for now.
+
+
+
+So all the stuff above worked out spectacularly, and now I'm trying to figure out static typing.
+
+So I mentioned some type dicts above. I'm thinking those will have four keys:
+
+    params: This will be a list of dicts, with each dict representing a 
+    parameter. These dicts will have two keys, type and name. I'm thinking
+    valid values for the type key for now will be "number", "boolean",
+    "string", "list", "map", and "any". Type parameters won't be supported yet,
+    meaning that for now you can't specify what, exactly, is in a particular
+    list or map; I may add support later. "any" means that any value can be
+    used.
+    
+    remainder: This will be either null if the function does not accept an
+    unlimited number of arguments, or a dict in the form of params (i.e. with
+    two keys, type and name) if the function accepts an unlimited number of
+    arguments. This type will be matched against all of the extra arguments.
+    
+    required: A number between 0 and the length of params specifying how many
+    of those parameters are actually required. All parameters after are
+    optional and can be omitted.
+    
+    returns: Either null if the function doesn't return a value or one of the
+    type strings mentioned above that specifies the return value of a function.
+
+
+
+
+
+
+
+
+
