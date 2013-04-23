@@ -1,0 +1,42 @@
+# Before you start up speakd for the first time, you'll need to create 
+# speakd.conf. This file serves as an example configuration file; you can
+# simply copy this to speakd.conf and you'll have at least a basic speak 
+# server.
+#
+# speakd uses Autobus to communicate, so you'll also need to have an Autobus
+# server running. This configuration file assumes an Autobus server running on
+# the local machine with the default port.
+
+[autobus]
+
+# This specifies the port that the Autobus server is listening on. You can omit
+# this line or comment it out to use the default (28862).
+port: 28862
+
+# This specifies the host that Autobus is running on. This must be specified,
+# and will usually be localhost.
+host: localhost
+
+# This specifies the name of the interface that speakd should register on the
+# Autobus server.
+interface: speak
+
+# Now, for every voice you want your speak server to support, you'll need a
+# [voice:the_voice_name] section, followed by some parameters for the voice.
+# A default voice with some default words that should suffice to say the
+# current date and time is included with speakd. Each voice is simply a folder
+# containing one .wav file for each word or phrase that can be spoken. Only
+# .wav files are supported right now. Each .wav file MUST be 44,100 samples-
+# per-second 16-bit mono. You'll get static or worse if you try to play a wav
+# file in any other format. I'm hoping to write a program that can convert
+# files in a different format to this format soon.
+[voice:jcp]
+
+# This specifies the folder that the voice's files are located in.
+path=voices/jcp
+
+
+
+
+
+

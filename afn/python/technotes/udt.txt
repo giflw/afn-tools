@@ -1,0 +1,185 @@
+So, I'm coming up with a collection-like thing that is a list, a set, and a dictionary all at the same time.
+
+I basically realized that there are three different aspects of this sort of datatype that lists, sets, and maps can fall into. Those are:
+
+    ordered: whether or not the collection is ordered
+    
+    duplicates: whether or not the collection allows duplicate items
+    
+    values: whether or not each item in the collection has an associated value
+
+There are, of course, eight possible combinations of the above aspects. The corresponding datatypes are:
+
+false, false, false: set
+false, false, true: map
+false, true, false: multiset
+false, true, true: multimap
+true, false, false: ordered set
+true, false, true: ordered map
+true, true, false: ordered multiset (also known as a list)
+true, true, true: ordered multimap
+
+So, the operations we need...
+
+We need things to add a new item to the collection.
+
+And we need a bunch of different variants of this sort of operation...
+
+We need a variant that adds the item to the end of the collection, and one that allows specifying an index to add the item at, and one that allows replacing the item at a particular index. Only the former would function correctly on an unordered collection; the behavior of the others is undefined.
+
+We also need a variant that gets rid of an existing conflicting value in the case of a unique collection, instead of refusing to add the new value.
+
+Then we need a variant that accepts a value.
+
+So that gives us 12 different methods.
+
+Wow.
+
+I think I'll run with it, though, and see how it goes.
+
+I need to come up with names for the methods, though.
+
+So, with List, the add-at-the-end and add-at-an-index methods are called add, while the set-an-index-to-an-item method is called set.
+
+So we could have add and set.
+
+Then we could have additional parameters for the value.
+
+So then what do we want to name the ones that replace existing values instead?
+
+Maybe put and replace.
+
+Let's try that.
+
+Ok, that worked.
+
+So now, methods for removing things...
+
+We need a variant for removing a particular item, an item at a particular index, an item with a certain corresponding value, or any item.
+
+We need a variant for removing the first such item, the last such item, or all such items.
+
+And then, of course, we need a variant for clearing out the entire thing.
+
+It doesn't make sense, however, to have first/last/all variants when removing by index, so we don't need to worry about that.
+
+So we have 10 combinations then.
+
+Let's try that.
+
+Ok, that worked.
+
+So now, methods for getting things...
+
+Well, we need a size method.
+
+Let's add that.
+
+Done.
+
+So now, collections need to be iterable. And iterating over them yields their items, in order for ordered collections or in no particular order for unordered collections.
+
+Then we have a method entries() which for now returns an iterable over the entries in the collection. I may have it return a collection in its own right; I'll decide later.
+
+And I'll probably have an iterable/collection for iterating over the values in the future.
+
+I might also have one that iterates over unique items; removing a value from this iterable would cause all corresponding items to be removed.
+
+So now we need to have methods for getting things.
+
+We'll want a variant that gets the item at a particular index and one that gets the item by a particular item. If that makes sense.
+
+We'll want variants that return the first, last, or all matching items. This, yet again, doesn't make sense for indexed requests, so they wouldn't count.
+
+We'll also want variants that return the items themselves, the indexes, or the values.
+
+Oh good heavens, that's sixteen different variants. There has to be a way to cut down on that...
+
+Well, let's see... We have three specializations: query by, first/last/all, and return items/indexes/values.
+
+So...
+
+index/first/item -> Yes
+index/first/index -> No, we already know the index
+index/first/value -> Yes
+index/last/item -> No, same as index/first/item
+index/last/index -> No, we already know the index
+index/last/value -> No, same as index/first/value
+index/all/items -> No, won't be more than one item per index
+index/all/indexes -> No, won't be more than one item per index
+index/all/values -> No, won't be more than one item per index
+item/first/item -> Maybe, could make sense if actual item is different than item being queried but are equals()-equal
+item/first/index -> Yes
+item/first/value -> Yes, equivalent to java.util.Map's get
+item/last/item -> Maybe, see three lines above
+item/last/index -> Yes
+item/last/value -> Yes
+item/all/items -> Maybe, see six lines above
+item/all/indexes -> Yes
+item/all/values -> Yes
+value/first/item -> Maybe, not sure what use this would be
+value/first/index -> Yes
+value/first/value -> No, not really a point
+value/last/item -> Maybe, see three lines above
+value/last/index -> Yes
+value/last/value -> No, not really a point
+value/all/items -> Maybe, see six lines above
+value/all/indexes -> Yes
+value/all/values -> No, definitely not a point to this
+any/first/item -> Maybe, would be the same as index/first/item for index 0
+any/first/index -> Maybe, see previous line
+any/first/value -> Maybe, see previous line
+any/last/item -> Maybe, would be the same as index/last/item for index size()-1
+any/last/index -> Maybe, see previous line
+any/last/value -> Maybe, see previous line
+any/all/items -> No, same as the collection itself
+any/all/indexes -> No, can be derived from the length of the collection
+any/all/values -> Maybe, unless there's a separate dedicated mechanism for this
+
+Ok, that's 8 combinations, 18 if I choose to add the ones I'm still deciding about.
+
+That's a bit more reasonable.
+
+As for naming...
+
+Maybe we have methods named something like getFirstItem, getLastIndex,
+getValues, etc.
+
+So basically, get(|Last|All)(Index|Item|)[s].
+
+Or maybe s/All//.
+
+That sounds good.
+
+So that worked.
+
+Are there any others I need?
+
+That's probably it for now.
+
+Ones I'll want to consider in the future: methods for adding all items from another collection, methods for converting the collection to an array, etc.
+
+So now we need an abstract implementation or two that provide a lot of the methods and require only a few to be implemented.
+
+So... I think I'm going to specify that, at least for the add/set/put/replace methods, if the collection doesn't support associated values, it should simply discard any values passed in, so that, for example, add(I item, V value) behaves exactly the same as add(I item) for a collection that does not support values.
+
+That allows all of the add/set/put/replace(I item) etc methods to be implemented by the abstract class to simply call the corresponding value version, passing null as the value.
+
+Then, the ones that don't take an index argument could be implemented to call add/put with the collection's size as the argument.
+
+So that cuts it down to four. I'll go implement those.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

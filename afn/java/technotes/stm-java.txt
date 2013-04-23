@@ -1,0 +1,17 @@
+Thinking about a Java STM library...
+
+So...
+
+I had an idea for preventing transactions from reading inconsistent state: have a global field indicating how many transactions have been committed since the whole thing started up, and every commit increments that. Then every TVar stores the last transaction number on which it was modified. Then when we start a transaction, we take a snapshot of the current global commit count, and if we ever try to read a variable during the transaction that's been modified by a more recent commit, we immediately abort.
+
+And since the individual TVar's commit counts can only be incremented by a commit happening, that should still be able to guarantee overall progress.
+
+So, let's not support nested transactions for now, and let's also not support orElse or retry.
+
+Throwing an exception will, however, abort the transaction.
+
+So, we'll have a class called Transaction that has a global field which is a thread local which holds the current transaction. And we also have a global field which is the number of transactions that have happened so far, which I'm going to start out as 1 (so the first transaction to actually commit is 2, I might change that later).
+
+Then we have a class called TVar which has fields for the actual value, and methods for setting and getting the value, which ask Transaction if there's a current transaction (and for now throw an exception if there isn't) and get the value from there.
+
+So let's see how that goes.
