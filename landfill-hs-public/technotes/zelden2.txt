@@ -1,0 +1,25 @@
+More notes on Zelden, and in particular the stuff to let clients attach to views.
+
+And I'm not going to worry about how to select exactly which messages to download; I'm just going to write this out as if we have this concept of "views" of a sort, whatever those are, and we have some ability to restrict messages that we're interested in to a single view. The particulars are a separate topic entirely.
+
+So, we have a table that can store things that we're to display, which I think I'll be calling events for now.
+
+Each row contains sufficient information to identify the view to which the event belongs.
+
+Each row/event also has an id.
+
+And I'm alternating between events and messages; they both mean the same thing.
+
+So, each message has a message id. The first message ever inserted into the table has id 1, the second has id 2, and so on.
+
+A quick aside: every where a range of messages is sent from the client to the server or vice versa, the start id is always exclusive and the end is always inclusive. This is a radical departure from most programming languages, but it makes a number of things more elegant.
+
+So one can pass a lower bound of 0 to get messages from the beginning of time.
+
+So then we have a protocol message where we can give a start id (exclusive), and end id (inclusive), and a limit on the number of messages to send back, as well as a disposition, which is either Early or Late. Early disposition means if there's less messages than the specified limit, send the earliest messages within that range, and late disposition means send the latest. For example, if the view we're querying has ten messages numbered 1 through 10 and we request a block starting with 2 (exclusive, so the first matching message would be 3) and ending with 9, and specify a limit of two messages, then with early disposition we would get back messages 3 and 4, and with late disposition we would get back messages 8 and 9.
+
+The response includes the requested messages, along with start and end range that the block covers. The end is always the id of the last message included, and the start is always the id of the message just before the first message included, or 0 if there aren't any earlier messages.
+
+Then we have a protocol message for attaching to a view. We give it a start id and a limit, and it attaches us to the view and uses the id of the last message sent to the view before we attached as the end id, then sends us back messages as per the command used for requesting previous messages, but always with late disposition. Then any messages that arrive after we've attached are sent to us, along with their message ids, until we detach.
+
+And of course we have a message for sending things to the view, like sending a message or running a certain command. I'm thinking I'll have those be a separate data type from actions sent to the connection for now, and then have functions for translating from view actions to protocol actions, which should be fairly straightforward.

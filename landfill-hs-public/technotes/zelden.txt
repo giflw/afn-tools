@@ -1,0 +1,70 @@
+Going to try writing Zelden again, but this time in Haskell.
+
+(Or at least the server will be. Haven't decided on the client yet.)
+
+Hm, thinking I'll write a nifty little utility library first, that lets you use sockets inside STM.
+
+Basically, it'll provide functions to "convert" a socket into a read Endpoint and a write Queue by spawning off threads to do everything. Or maybe I'll allow it to take a custom Endpoint to pull data off of and a custom Queue to put data onto.
+
+And maybe I could even do the same thing with server sockets, have a thing that takes a Queue Handle and accepts sockets and sticks them onto the Queue. Might do that later, though, as that's not as necessary.
+
+So, the endpoint you read from to read a socket would be an Endpoint (Maybe Packet) or something, where Nothing gets pushed across once data runs out. Might be nice, however, to give the converter an iteratee that it can use to parse data received from the socket into concrete packets and hand it to the queue that way. Or just hard-code it to push lines across; if I have Zelden be JSON-based, and require that each JSON command be on a single line, that'll sort me perfectly.
+
+I think I'll do that for now. And then have the converter have two functions (String -> a) and (a -> String) for encoding and decoding on the socket thread before handing stuff off.
+
+Let's try that.
+
+Ok, done. And worked well.
+
+So now I need to figure out how everything else is going to work.
+
+Protocols need a way to expose things that can be configured about them. Maybe I'll just have it be a hierarchical thing like JZBot's configuration variables were.
+
+So then each protocol exports a set of variables it needs. Each variable has a name, a description, and a type. The types, for now, I think I'll have be Text and Folder [Variable], the latter of which would allow a folder to define what variables it contains. I might also have the default value be specified in there somewhere, probably as part of the type, with folders obviously not needing a default. And maybe a validation function could be specified too, if desired.
+
+Then each protocol would be provided with its configuration when creating connections, which would include the values of all of the variables. And whenever a variable ends up changing, a protocol would be notified.
+
+You know what, for simplicity let's just have a set of keys and values, and they're both strings, and a protocol simply indicates a list of strings representing the keys it needs, perhaps along with default values, and then we hand the protocol a list of the keys when creating it and let it know when the user changes any of them.
+
+We also pass some sort of Server object into each protocol that it can use to interact with us.
+
+So Zelden starts off with no accounts. When an account is created via a client, it creates an account number and a protocol for it, and tells the protocol to start connecting, or something like that.
+
+You know, I should take a look at lambdabot to see how it handles connections...
+
+Lambdabot's rather convoluted. And I'm still waiting for darcs get...
+
+So in the mean time, I think protocols should be in charge of connecting on their own. The only thing Zelden can do is tell a protocol if it's supposed to be enabled or not, with the idea that the protocol will disconnect if it's supposed to be disabled. But it doesn't have to actually honor that, although it should.
+
+And protocols can't be deleted for now; they can just be disabled and then hidden from the list of protocols.
+
+Then let's say we implemented most protocols to store their enabled/disabled state in a TVar Bool. Then we could watch for changes by simply comparing that to another TVar indicating our current status, and retrying if they're the same. Then when we eventually change our enabled/disabled status, that'll be updated accordingly.
+
+Or heck, we could just do that in the thread that tries to connect and stuff. (Also, this brings up the point that if I end up using Zelden.IO, streamSocket really ought to be able to update a TVar to indicate when the socket's been closed so that this main thread can block until either the socket closes for whatever reason or the protocol gets disabled; if the latter happens, we just write Nothing into the queue, then go back and block until we see the socket close.)
+
+Either that or we have the bit that reads stuff off the queue be part of that thread, so it blocks on either a new message coming in from the queue (or the "socket just died" message) or for enabled to be set to False, and if the latter happens we just send Nothing into the output queue and go back to doing things as normal, and eventually we'll get Nothing back when the socket shuts down and we'll drop out of that bit of the loop into the bit where we actually try to reconnect, only we'll see that we're disabled right now so we'll block on waiting to be re-enabled.
+
+Man, Haskell's STM implementation is positively lovely.
+
+Ok so, we just let the protocol know when we want it to be enabled or disabled, and we let it know when we create it and when we feel like changing it. I'm thinking for now I'll have the notification done in STM, even though there's probably not much reason. If a protocol ends up needing IO in that bit of code, I'll reconsider.
+
+So of course the protocol typeclass should have a function for creating new protocols given the configuration details for that account and the current enabled/disabled status.
+
+And we also give the protocol the account id to which it's associated. It'll use that for most calls it makes into Zelden.
+
+Actually you know what, I think I'm going to have most things to protocols be in IO for now, and change it to STM later if I really need it to be transactional.
+
+So then a protocol can ask Zelden to create a new channel id or a new user id. Channels and users have names (which every protocol I can think of has) that Zelden knows about, and a protocol can request the id of a channel or user by their name, and then create one if one doesn't already exist. (I might have a function to combine that bit, the "see if it exists and if it doesn't, create it" bit.)
+
+This also seems to need some sort of locking ability, to coordinate all of this between threads, which is what I wanted to use STM for so this needs a bit of thought, how to go about doing this properly. Maybe have a single manager thread for communication with the database like that, and an STM queue that we can use to push requests to it and give it a TVar to stick the response in when it has one for us, then we just retry on the TVar until we've got a response. This needs some thought.
+
+
+
+
+
+
+
+
+
+
+
