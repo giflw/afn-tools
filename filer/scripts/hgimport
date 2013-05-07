@@ -1,0 +1,44 @@
+#!/bin/bash
+
+# Exit on errors
+set -e
+
+# Use Alex's filer alias. This will be removed later.
+filer() { python -m filer1.commands.main "$@"; }
+
+# map contains lines where the first field is a mercurial rev and the second
+# line is the corresponding filer rev
+
+hg log --repository source -r $1 --template "{node}\n" | while read hash; do
+    echo Source revision `hg log --repository source --template {rev} -r $hash`
+    parents="`hg parents --repository source -r $hash --template "{node}\n"`"
+    parent="`echo "$parents" | tail -1`"
+    hg update --repository source --clean $hash 
+    if [ -z "$parent" ]; then
+        # No mercurial parents. Do a blank Filer checkout.
+        echo Blank filer checkout.
+        filer checkout --repository target --working source
+    else
+        # Mercurial parents are present. Look up the corresponding Filer parent 
+        filerparent="`cat map | grep "${parent}" | cut -d " " -f 2`"
+        if [ -z "$filerparent" ]; then
+            echo "No filer revision for mercurial parent $parent. Exiting."
+            exit 1
+        fi
+        # Checkout the parent
+        echo Checking out filer revision $filerparent.
+        filer checkout --repository target --working source --revision "$filerparent"
+    fi
+    # Commit
+    filer add -a --exclude-name .hg source
+    message="`hg log --repository source --rev $hash --template {desc}`"
+    filer commit --repository target --working source --message "$message
+
+--mercurial--
+rev: $hash
+$parents"
+    filercurrent="`filer current --working source`"
+    echo Filer revision $filercurrent added.
+    # Add an entry to the map
+    echo $hash $filercurrent >> map
+done

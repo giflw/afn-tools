@@ -1,0 +1,218 @@
+Working on an archive file format, like git's pack files...
+
+So, how they'll work.
+
+Actually, first I'm going to go have a look at how git does its index files...
+
+(I want, if possible, Filer's archive format to store the index and the data in the same file)
+
+So it looks like they're using a B-tree-like thing, only not. What they're doing is storing a table of offsets into a location table, more or less, as a table whose keys are the first bytes of the SHA1 hashes. So it's like a B-tree but with only one level.
+
+Which makes me wonder if I couldn't do a B-tree-like thing, but with multiple levels.
+
+So, have the upper four bits of the first byte of the SHA1 form one key, and the lower four bits form the next key, and so on until only, say, sixteen commits remain, and then just use those.
+
+Actually no, let's do 256-entry tables for now, to give less disk reads to look up a single file in a pack.
+
+No, never mind, let's make the table size dynamic, so that it can be specified when generating the index part of the pack file.
+
+So, let's say that the table size is N and the maximum number of commits before a table is made is M.
+
+If there are less than (or there are exactly) M commits with a certain prefix, then those commits are stored in order.
+
+Otherwise, those commits are made into a table with N buckets, and the process is repeated to the prefix specified by the entries in those buckets.
+
+That, of course, means that N must be a power of two, which is fine.
+
+Actually, let's just say that M and N are 256 for now. We can adjust them later.
+
+You know, maybe we should have separate index files, because it's pointless to send the index data across the network.
+
+So in that case, I'll write the data file format first, then come back to the index file format later.
+
+So, data files are stored with a magic number, which I'll decide on later.
+
+Then they have an eight-byte number specifying how many objects they contain.
+
+(Objects can be any binary data; they need not be BEC objects, although they pretty much always will if they come from Filer.)
+
+Then each object is present, such that, for any object B which is stored as a diff of object A, A comes before B in the file.
+
+Each object is encoded starting with the object's hash, stored as a sequence of 20 bytes. (There's a chance I may use SHA-256 in the future, in which case this will become 32 bytes.) Then comes a single byte, specifying how the object is encoded. (This is called the type code.) Then eight bytes follow, specifying the length of the object's encoded data. (I may change this to be some sort of variable-length encoding later.) The object's encoded data then follows, based on the particular type code:
+
+    \x01: The object's data is stored literally, byte-for-byte. No compression, nothing.
+    
+    \x02: The object's data is stored as-is, but compressed with gzip.
+    
+    \x03: The object's data is stored as a bsdiff4 delta of a previously-encoded object. The first 20 bytes (or 32 bytes, if SHA-256 hashes end up being used) specify the hash on which this object is based. The rest of the bytes are the diff.
+    
+    \x04: The object's data is stored as a gzipped bsdiff4 delta of a previously-encoded object. The format is the same as for \x03, but the bsdiff4 data is stored gzipped.
+
+
+
+That's it for the format for now. I might store a hash of the file at the end later on, but not yet.
+
+So, now for how the archiver itself works.
+
+What it does is takes an iterator of (hash, fileutils.File) tuples and wraps it in a mutex to allow thread-safe requests for the next object to encode.
+
+Then it spawns a number of threads (the precise number can be specified) that sit there and request new objects from the iterable. Each thread, on requesting a new object, obtains a lock, requests the object, adds it to the end of the sliding diff window, removes the object at the other end of the sliding window if it's at the maximum length, makes a copy of the sliding window, then releases the mutex. The sliding window includes the hashes and file objects of all of the input files; the thread then proceeds to generate a diff of the file it's processing against all of the files in the sliding window that it saw when it released the mutex. It then makes gzipped copies of the diffs, and then it makes a gzipped copy of its original data.
+
+Then it checks to see which, of all of the combinations of diffs, gzipped diffs, original data, and gzipped original data, is the smallest. It then obtains the file output lock, writes a new entry at the end of the file (a pointer to where the last thread that wrote to the file left off is stored in memory), and releases the lock. It then requests another object to diff and starts all over.
+
+Once all of the threads are done, the process is complete.
+
+The function that runs and consumes objects to process is written as a function that can just be called directly from the archiver instead of in a thread, if the archiver is to be run with threads disabled. There's not really much of a point to that, but you can do it if you want.
+
+
+
+So it sort of worked. I haven't got it to do threads yet; I think that'll help a lot. But it sort of works.
+
+The main issue is that the commits are being sorted by commit hash right now, which is really less than optimal. And, I think because of that, I'm only seeing ratios along the lines of 50%. Which is obviously better than raw commits, but still not optimal.
+
+Another observation: gzipped diffs essentially never turned out to be smaller than raw diffs, so I'm scrapping that bit for now.
+
+So we just compare the original file, the gzipped original file, and the diffs (not gzipped) against the other files.
+
+So, the next step, I think, is to have the iterator yield a set of files to compare against, instead of manually keeping a window.
+
+I'll probably have the iterator yield the revision's parents for now, and that's it.
+
+At a later date, I might have it yield a few of their parents, too, up the line until, say, 20 commits are collected.
+
+And after I get that done, I want to have this thing keep track of how many diffs there are in a particular chain, so that it can avoid going too deep that performance suffers, and stuff.
+
+And actually, I just realized that the parents idea is bad, because what we really need is to diff against children, but that won't work because we don't have a way to access children.
+
+Actually, let's try sorting commits by their numeric sequence in which they were inserted in the repository first, and see if that improves things any. It won't help as much as git because the multiple-commits-per-changeset thing (a changeset is a set of commits all made at the same time with the same commit command) means a lot poorer locality of reference, but it should be better than the hash-based stuff going on right now.
+
+Also, I might want to trim down the repository to the point just before I imported uservoices, since those being binary files are probably unnecessarily taking up a lot of space since those won't diff well.
+
+
+
+So I just tried things without the uservoices folder, and that's a bit more like it: 86% smaller (i.e. compressed was 14% the size of the original). And I think I might have a jython.jar in there somewhere; I bet removing that would make everything even smaller.
+
+So this could work.
+
+I just need to make it faster. Maybe find a faster binary diff algorithm, if there's one faster than bsdiff4 out there. Or try also doing textual diffs and gzipping them (since those would benefit from gzipping), although I'd need to make sure that they can preserve binary content, too (even if they're really inefficient at storing it, since then the bsdiff would take over because it'd be smaller).
+
+Adding support for multiple threads made it fast enough that I'm going to leave it as is for now.
+
+So now I need to figure out how to the archive index. I've decided that I don't like the B-tree approach so well because it will result in a lot of reads. I'm thinking I might experiment with a hash-based format instead.
+
+And the hash used would be the CRC32 of the name of the file to be archived; this is so that the archiver can be used separately from Filer, with filenames that might not themselves be hashes.
+
+So I'm undecided as to whether to use separate chaining or open addressing. I'm leaning toward separate chaining because I'm rather more familiar with how to write separate chaining hash tables, and because it'll have better locality of reference: assuming the linked lists are stored in a separate section of the file from the hash table, only two disk reads would be needed to determine the position of a particular object in the archive: one from the corresponding cell in the hash table, and one from the linked list area.
+
+Separate chaining it is, then.
+
+So, the hash table will almost certainly be located at the beginning of the file, so that a single object lookup can be done without any need to seek backward in the file. I'm thinking the hash table will store indexes relative to the start of the linked list and the linked list will store indexes relative to the start of the actual object contents. This will allow for 1: the future potential of splitting out the index and the object content, and 2: the linked list table to be written without needing to know how long it will be in advance. Offsets to the start of the hash table, the start of the linked list table, and the start of the object content will be stored at the beginning of the file, probably after the magic number.
+
+So, the format...
+
+Somewhere at the beginning of the file will be the offset table, as mentioned before. This will have four 8-byte integers, so 32 bytes total.
+
+    The first integer specifies the offset to the start of the hash table.
+
+    The second integer specifies the offset to the linked list table.
+    
+    The third integer specifies the offset to the start of object data.
+    
+    The fourth integer specifies how many hash buckets were used, as a number N such that the number of hash buckets used is equal to 2**N (where ** is exponentation).
+
+Then there's the hash table, which is stored as two eight-byte integers per hash bucket. The first integer points to the offset in the linked list table at which the relevant entry begins, and the second integer specifies how long, in bytes, the relevant entry is.
+
+Then there's the linked list table. For each hash bucket that has any values, an entry in the linked list table is stored; it contains two bytes, a string of bytes, and an eight-byte pointer for each corresponding object.
+
+    The two bytes are the number of bytes in the name.
+    
+    The string of bytes are the name.
+    
+    The eight-byte pointer is the offset into the object area at which the object is stored.
+
+Then come the objects, encoded as mentioned a few pages back. 
+
+So I've finally (you'd think it would have been quicker) observed that I'm basically writing a read-only dbm-like thing. And I've already been doing a fairly good job at this, but that makes me think all the more that I need to keep the dbm-like part separate from the delta-encoding part so that the various parts can be reused and so that I can swap things out in the future if I decide I want to.
+
+And I've actually decided I want to change the format, so that not all of the nodes in a particular linked list entry have to be loaded into memory.
+
+Here's how I'm thinking it'll work: hash table entries are made up of ten bytes; the first eight are the offset into the linked list table at which the entry is present, and the next two are the length of the first entry in the linked list table.
+
+Then each entry in the linked list table is made up of eight bytes, two bytes, and a string of bytes, which mean the same things as I had planned before, except that the two bytes are the length of the /next/ entry in the linked list table, or zero if there is no next entry.
+
+So a lookup can proceed by jumping to the relevant location in the hash table and noting the length of the first entry and the position at which it is stored.
+
+Then we read that many bytes from that position in the linked list table, and parse it as noted above. If the string of bytes matches the key we're looking for, we're done, and we have the location of the corresponding object. If it doesn't, we read the next N bytes, where N is the length of the next key specified in the key we just read, and proceed from there until we find a match or we get a zero-length key, which means the key we're looking for isn't present in the table.
+
+And that should be it.
+
+So then we should have a library for writing these files. I think I'll plan on allowing it to store all of the keys in memory to sort them into buckets; if that gets to consume too much memory, I'll figure something else out. But, since the names are all that'll be stored in memory, an entry would only use probably less than 100 bytes of memory, so 100,000 entries would result in a maximum memory usage of 10MB, and Python's interpreter overhead is 5MB anyway so I think that's fine for now.
+
+(So, since a normal commit seems to expand to about ten filer commits, about 1,000 commits would equal 1MB of memory when packing. I'll need to figure out a way to up this in the future since things like Linux have far more commits than that, but I could always use a different dbm-type storage format or pack every, say, 100,000 filer commits (10,000 normal commits, or changesets as I'm going to call them) into its own file. Wouldn't necessarily be optimal, but it could work. But I'll think about that once I've actually got that many commits to work with.)
+
+So I decided I really don't want to have to store everything in-memory as that'd be quite wasteful. I want to be able to write huge pack files at a time.
+
+And this needs some thought, as I did some tests and verified that only about 200 seeks across long ranges can be executed on a file, which is expected from my hard disk's rotation speed.
+
+My thought was to make it possible to append existing entries to an archive after the archive had already been written, in constant time per entry. Thus an empty archive could be created and each entry appended to it one by one. The number of hash buckets would, however, be fixed at creation. A new object would be added by looking up the corresponding hash bucket; if it didn't point to an object, the object was written to the end of the file and the hash bucket updated to point to it. If, however, it did point to an existing object, the new object would be written out with a pointer to the object currently in the hash bucket, and the hash bucket would be replaced with the newly-written object. Objects themselves would then include their name just before their content.
+
+One could look up any given object by looking up the corresponding hash bucket and following it to the object it pointed to; the name of this object was checked, and if it wasn't the right one, the next object (which the current object stored a pointer to) was looked up, and the process proceeded until either the object in question was found or an object without a pointer to another object was found.
+
+The problem is twofold. First, the object pointed to by the next pointer would already have been written and hence be further back in the file, and some tests I just did seem to indicate that seeking backward is around 3 times slower than seeking forward. Second, and more importantly, storing the linked list nodes all over the place in the file results in very bad locality of reference, the kind that could easily slow down object lookups where there are multiple entries per hash bucket by several orders of magnitude. (Seeking forward by 1KB around 20,000 times took around half a second, but seeking forward 100KB only 200 times also took half a second.) So I don't think an appendable format that works like this is feasible; linked list entries really need to be grouped together in order for disk reads not to slow down the whole thing.
+
+So, how could things still be done without having to store everything in memory?
+
+You know, I'm really tempted to see if I can figure out how to write something like this using just a SQLite database for now, to get a rough draft going. The only problem is, SQLite database row values can't be particularly large, as they're stored in memory. And I don't want to store them in a separate file as I want a way to be able to store everything in a single file. (And I don't think it's possible to tell SQLite to open a database in read-only mode and only use a particular range of a file.)
+
+Darnit, I somehow keep designing myself into corners like this, which is really annoying...
+
+Ok, we're going to use some sort of multiple pass thing, if I can work out how to do one properly.
+
+Gah, I need to go to bed and think about this tomorrow. Maybe I'll end up using a SQLite database just to get things working, and have it store things in memory for now. Then we can just produce a wrapping StringIO instance whenever an object is requested from the store.
+
+(The store will still be read-only, once it's been initially created. That way I can rewrite it into using a pack file format later on.)
+
+So, we need a nice little API, maybe KeyValueStore or something, and then a SQLiteKeyValueStore that we'll use pretty much everywhere for now.
+
+It would be nice if we had the thing that reads key-value files be able to detect the type of file, so that once we start writing the hash table archive format I'm still trying to come up with, we can still read the older sqlite-based files. That shouldn't be too hard if we have a single function, say open_db, that opens a key-value database for reading, and that method would look at magic numbers and such and determine what class to use to read it.
+
+So then to read these, we open a key-value database and get back an instance of the abstract class KeyValueStore. A particular key-value store would have a close method to close it and would also be a context manager, and would also have a __del__ that closes it if it wasn't closed already. Then there's a method called... I'm thinking "get"... that we pass a key into and it gives us a file-like object that allows us to read the key's value. (The SQLite-based version would likely return a StringIO here; the future hash table format would probably return some sort of range-based seeking file instance, like the one I've got in the BEC decoder for reading streams from a BEC file. I'll probably actually generalize that class into an afn.utils class that would be used by both BEC and the archive format.) And then there's another method, probably "list", that's a generator that yields the names of all of the keys stored in the key-value store.
+
+And we don't have to worry too much about concurrency as the whole thing's read-only. The only point where we'd have to worry about that would be when we write the hash table format, when those range file thingies are seeking in the actual file; we'd need to make reads from them atomic. (Performance would obviously go to crap with multiple threads reading from a hash table key-value store due to all the seeking back and forth, but that's a lot better than obscure race conditions and data corruption.)
+
+So, then, to build a key-value store, we provide a fileutils.File object to write the store to, and we provide two functions: one that, when called, returns an iterator (or iterable) over the names of all of the keys to store, and one that, when called with a particular name as its argument, returns a file-like object that can be used to read its value. (This would allow copying a key-value store into another key-value store by passing the source store's list and get methods, respectively, and it would also allow an easy way to take a folder with a bunch of files and store them in a key-value store by passing something like lambda: (f.name for f in the_folder.list()) and lambda a: the_folder.child(a).open("rb"), respectively. (I'm hoping to add a list_names method to fileutils.File to allow for a less memory-intensive way of doing the above.)
+
+And then that allows key-value stores storing revisions and diffs to be built simply by writing each revision/diff to a file with the revision's hash as its name and then storing those in a key-value store as mentioned above.
+
+The only issue I can see is that during delta compression, one file per delta would have to be written out, and on a hard disk with a 4KB block size, 1,000,000 revisions would need a working space of 4GB just to delta-compress, even if the result produced was a lot smaller. But I suppose we can address that once we actually get there; it might even be possible to address it by storing multiple key-value stores and combining them at the end, which would be slow as each store has to be asked in turn for the relevant key, but it would at least work.
+
+But let's not worry about that for now.
+
+So we've got a good way to write these archive files. And I'm thinking that'll be an abstract static method (of a sort, since Python doesn't actually have those; it'll just be a static method that throws a NotImplementedError when invoked) on KeyValueStore, called "create" or something.
+
+Actually, let's go write that real quick.
+
+On second thought, let's write that tomorrow, when I'm less tired.
+
+Ok, less tired. Let's write it.
+
+
+
+Ok, that's written, and looks good.
+
+So now we need to think about the API for creating and reading key-value stores that contain delta-compressed commits.
+
+But it's fairly late, so I'll do that tomorrow.
+
+
+
+So I'm awake now and thinking about stuff.
+
+And I'm thinking it might be nice to write this so that it can be used with a mutable key-value store as well. I work for Fusion-io right now (note that nothing I say here represents any sort of official position of Fusion-io)
+
+
+
+
+
+
+
