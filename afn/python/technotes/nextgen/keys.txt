@@ -1,0 +1,181 @@
+So, the Keys system.
+
+So this is basically going to be like Apple's KVO, but with some differences.
+
+Probably the most notable one is going to be that objects and lists and sets are all observed separately. With KVO, you observe objects, and that's it. You can observe to-many relationships in objects, but you can't observe a collection aside from the object that contains it. Keys will change this whole idea so that collections are independently observable.
+
+Hm... I can already see how this is making things more difficult, though it has so many advantages...
+
+Let's see...
+
+So I'm running into problems already, and I don't have any sort of Objective-C compiler/interpreter handy so I can't see what they do. One of the problems I'm running into is what should happen if an observer for y/z is registered on x, and y is then set to None. My thought for now is that y/z should also appear to become None, but does that work for other things?
+
+And how does list observing work into that?
+
+Well...
+
+What if we have each part of a path be specific to the thing handling it?
+
+Actually, let's just worry about single keys for now, and we'll worry about paths later on.
+
+And for now, let's just worry about dictionaries and objects, and we'll worry about lists and such later on.
+
+And we'll allow observing for * right now, but we won't allow getting it as a key.
+
+So let's see...
+
+Compatible things will provide an observe method. And I'm thinking list observing things should work the same way. This accepts the function to register, the key to observe, a context object, and any additional requested options as keyword arguments. I'll decide what these options are later.
+
+So the specified listener is then registered.
+
+I should probably go to bed and think about this more tomorrow.
+
+
+
+So let's imagine that for now we didn't... Oh, I'm thinking of integrating Autobus into this. Autobus's object publishing thing would subscribe to any observable object passed to it so that when the object's value itself changes, notifications are immediately sent out.
+
+And I'm also thinking that it might be nice if changes can be grouped together, meaning that obsevers accept a list of changes instead of just a single change when something happens. That way, changes can be grouped together where it makes sense; some_dict.update(x=1, y=2, z=3), for example, would be dispatched as one notification presenting three changes in the list.
+
+
+
+So I'm also thinking that I'm going to screw keys for now and just get something to work with one level deep. I'm going to make it so that you can just observe things and when you observe them it recursively observes any of their children. I'm also going to have a separate observe_list and observe_map for now and then worry about combining them together later.
+
+So let's see... We have two classes, MapObservable and ListObservable. MapObservable has observe_map and ListObservable has observe_list.
+
+For now, actually, I'm going to just implement MapObservable.
+
+So let me think... The idea is that the default observable thing is ObservableMap. This would have a method like observe_map(listener, context=NO_CONTEXT, recursive=False) (where NO_CONTEXT is a singleton). recursive means that all things that are themselves observable that are added to the map will be observed by that listener.
+
+Of course, that poses a problem that I just realized. Obviously any ObservableList put into an ObservableMap should be observed as well...
+
+So maybe we just have an Event class that manages a bunch of things registered for a particular event, and then an Observable class that manages an Event instance and provides an observe method. Or something like that. Then a concrete implementation of Observable would have to provide methods for looking up what values currently exist and such so that they can be recursively observed; ListObservable and MapObservable would ostensibly provide these (and their implementations should call the superclass implementation in correct MRO order so that a class extending both ListObservable and MapObservable will still function correctly). So this needs more thought... and I'm going to bed for now...
+
+Ok, back awake. So I checked up on super() and it correctly honors the class's MRO, meaning that if you have an inheritance diamond with class A, class B(A), class C(A), and class D(B, C), and each has a method that calls super(...).the_method(), then when that method is called on an instance of D, D's implementation will be run, then B's, then C's, then A's. So thiat works out perfectly for what I'm thinking of doing; the methods provided by MapObservable and ListObservable just call the superclass's implementation. Observable will provide an implementation that just silently doesn't call the superclass implementation; assuming both MapObservable and ListObservable extend Observable (which they will), Python's subclassing semantics will guarantee that Observable appears in the MRO after MapObservable and ListObservable, thereby making this work.
+
+So let's see... We have the observe method be, for now, something like this:
+
+observe(listener, handle=None, recursive=False initial=False)
+
+listener is a function (whose signature I'll describe later) to call when things happen. It can be a weakref to a function if need be; when the weakref is dereferenced, the listener will be automatically removed. handle is the context to add the listener under; this serves as a sort of handle that can be used to get at the listener in the absence of the listener itself. recursive is True to recursively listen to all objects listenable by this object, false not to; for MapObservables, all key values will be automatically observed, themselves recursively, and for ListObservables, all list items will be automatically recursively observed. initial is True to call the listener immediately for all items already preset, False not to.
+
+Then there's a method:
+
+unobserve(listener=None, handle=None)
+
+Either listener or handle must be specified. If listener is specified, that particular listener will be removed. If handle is specified, all listeners registered with that handle will be removed.
+
+When something happens, the specified listener is called as listener(source, change_list, initial). source is the thing that the listener was originally registered on. change_list is a list of the changes that happened; these are specific to the type of change. For example, when a new key is added to a MapObservable, an instance of KeyAdded will be in this list. initial is True if this is an initial calling and false if this is because a change actually happened.
+
+So let's see... We need to have three layers to this whole thing: the Observable layer, which is the bit that handles observing in general; the specific types of observation such as MapObservable and ListObservable that provide a particular type of observation but don't specify further how... hm, what if we just had two layers?
+
+For recursive observing, all Observable needs to know is what the current list of child things is and then it needs to have methods that are called when other child things are added or removed. And in that case, we might just be able to have two layers for now, Observable and things that are observable.
+
+So Observable tracks a map of listeners. The keys are the listeners themselves. The values are Registration instances. A Registration instance right now only tracks whether the listener is recursive.
+
+When a listener is added, the map is checked to make sure that the listener is not already present. (Reentrant registrations will be allowed at some point in the future, but not yet.) Then it adds it to the map of listeners. If the listener is recursive, it then asks self to get a list of all things currently present (by calling self._get_current_values), and it adds listeners to those things; those recursively-added listeners simply call the passed-in listener.
+
+When a listener is removed, the map is checked and the corresponding registration removed. If the registration was recursive, the listener that was initially added to all objects currently present is removed.
+
+When an event occurs that adds an object, ...hm.
+
+Ok, I think I'm going to standardize something here. I'm going to standardize that there are only two observable types, MapObservable and ListObservable, and Observable itself will depend on those two being the only types in existence.
+
+So when a change happens, self._notify_change is called, passing in the list of changes. For each of these that adds a new value, Observable checks to find all of its recursive registrations, ...hm, that's pointless because multiple listeners will be registered...
+
+So what if we have it so that when the first recursive listener is added, it causes self._recursive_changed to be registered to all current values, and when the last recursive listener is removed, self._recursive_changed is removed. That will make things simpler.
+
+So when a change happens, self._notify_change is called, passing in the list of changes, For each of these that adds a new value, Observable checks to see if we have any recursive registrations, and if we do, it adds self._notify_change to them if they're also observable. For each of these that updates a value, Observable removes _notify_change from the old value and adds it to the new. For each of these that removes a value, Observable removes _notify_change from it. (I just changed all of the change classes so that values being added are stored in fields named "new" and values being removed are stored in fields named "old", so the changes can just be checked to see if those two fields are present.) Then Observable calls all of the listeners.
+
+Ok, I think that's about it.
+
+Oh, and, of course, when a listener is added or removed, it checks the recursive stuff, and adds or removes the recursive listener as needed.
+
+Ok, I'm going to see if I can implement that for now.
+
+
+
+So this all worked brilliantly. I've now got a working ObservableMap and ObservableList.
+
+Well, sort of. They work just fine, and listeners can be made recursive. But there's one main thing that they don't support right now: key paths.
+
+And I'm realizing more and more that this needs to be added.
+
+One major reason why key paths are so needed is that they make it considerably easier to listen to events happening at a particular level of recursion.
+
+So key paths need to be added. But because I'm supporting keys other than just strings, and because I'm letting lists be their own observable things instead of having them just be a piece of an object, so to speak (as to-many relationships more or less are), I'm going to have key paths actually be lists. They'll be lists of the components of the key path, and each level of recursion would consume one component from this list.
+
+For lists, components should just be None for now; I might allow indexes in the future. For maps, components can be None to mean all components or a particular key to mean that key's value. The last component in the list is the one that changes are watched for in; for example, using [None] as the path while observing a list or a map yields the behavior of the current system when a path isn't passed in.
+
+A path can also be specified as a string. This is a sort of shorthand; paths are converted from strings to lists before anything else is done with them. Paths are split into components by splitting around "/" characters; for each of these components, if it's the character "*", None is used for that component; otherwise, that component as a string is used. For example, hello/*/world/bye would be translated into ["hello", None, "world", "bye"].
+
+Listeners can still be specified to be recursive. This acts recursively starting at the end of the path.
+
+When a listener is called, it's passed the path that it was originally registered under, a path that can be used to reach the object that the change actually happened at (each component will be specific to the observable thing that it comes from; maps insert the key as the component while lists insert the index; this is intended to allow one to traverse the originally-observed thing and get down to the thing that changed by using this path list), and the list of changes.
+
+So that pretty much sorts the public API side of it. Now how do we actually go about implementing it?
+
+Well, we currently have a function called _get_current_values for asking an observable for all of its values, which allows us to recursively access things. I'm thinking that we need to change this to get_values_for_key, which, given a particular path component, hands us back the values represented by that component.
+
+Actually no, what if we just have get_value_for_key, and we specify that each path component must denote either zero or one values, except that the path component None denotes all values. And we specify that passing None to get_value_for_key returns a list of all values.
+
+Hm... So how does that work with lists? Lists aren't going to have keys for now...
+
+Well... Let me think about what's involved in registering listeners...
+
+So when we register a listener, we pass in a listener, a path, and whether or not the listener is to be recursive. If there's only one path component, we add the listener to a multimap the maps path components to listeners listening for them. If we're recursive, we then ask ourselves for a list of things already existing for that path component and register some sort of listener on them which I'll get to in a bit.
+
+Hm...
+
+I'm wondering now if the object th... hm.
+
+Now I'm sort of confused...
+
+Ok, what if we say for now that individual changes don't include the I'm really tempted to object on which the change happened, and the batches of changes can be submitted only for a single source object. That way we can get rid of the source object stored on each individual change and instead have a path to get down to the object and a list of the object and its parents passed in.
+
+So then our listener looks like:
+
+something_happened(path, hierarchy, changes)
+
+path is the path to get down to the specified object; each component will be a key if that component is a dictionary or an index if the component is a list. hierarchy is the values actually corresponding to each of those components; this will be the map value or the list item for each item. hierarchy, therefore, has one more item than path does. For example, if a listener is registered on some_object and a change happens on some_object itself, path will be empty and hierarchy will be [some_object]. If some_object is a map {"x": {}} and a new key is inserted into some_object["x"] with the key "y" and the value "z" (such that the new some_object will be {"x": {"y": "z"}}), and a recursive listener is present on some_object, then the path will be ["x"] and the hierarchy will be [some_object, some_object["x"]].
+
+So I'm going to implement that for now without supporting keys just yet. We can rewrite all code that needs keys to just check the hierarchy and see if it's what we're interested in; it's not optimal, performance-wise, but I can fix it up later.
+
+
+
+So I did all that and it needs a rewrite.
+
+It also needs to allow reading and updating objects, not just observing them.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 

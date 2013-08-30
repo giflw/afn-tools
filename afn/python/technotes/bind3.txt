@@ -1,0 +1,43 @@
+So it's interesting to think about what things would be like if we actually had each bindable thing run in essentially its own thread, under an STM system where a transaction can be run in such a way that it produces a list of variables that were read, and all of them can be blocked on as soon as the transaction is over, in such a way that one can run a transaction and get its return value, then block until its return value might change and re-run the transaction.
+
+(We'd probably need both the list of vars accessed and the id of the transaction that it received when it committed, so that when we try to block, we can scan and see if any of the variables have changed in the mean time, and if they have, re-run immediately.)
+
+So, if we had a model like that, and if we were only going one way with this, so no two-way updates, then when we say x = y, we just have x read y's value and keep running the transaction over and over again and update x's value every time it changes.
+
+Which is fine, but it doesn't cover propagating changes the other way.
+
+
+
+Ok, off to some other stuff for now.
+
+So, one thing I don't like about the current bindings system is that it requires synthetic observers to keep stuff in memory to bind/unbind to/from. For example, the value bindable in a value unwrapper is synthetic and exists purely to bind its contained value to the bindable property of its unwrapper, which is a nullary synthetic bindable. But since changes only note the new value, not the old, it has to keep track of the old value so that it can unbind it when a new value comes in.
+
+So, my thought was to have all changes note any relevant old values. SetValue, as it's used by ValueBinder, then has an old and a new, DeleteKey has an old, SetKey has an old and a new, and the new AddKey has a new. And so on and so forth.
+
+So then, ValueUnwrapperValue's perform_change becomes (where bindable is the unwrapper's bindable):
+
+    unbind(bindable, change.old)
+    bind(bindable, change.new)
+
+Of course, then we need to deal with synthetic bindables.
+
+My thought is we then have GainedValue and LostValue; the former indicates that we're now concrete and the latter indicates that we're now synthetic. The latter would also include an object representing the circuit's value just prior to losing its value.
+
+(And I'd probably have a decorator for perform_change that you can use to tell it to translate LostValue and GainedValue for, say, a dictionary into a list of AddKey and DeleteKey messages, to make handling logic simpler.)
+
+So then bindables would need to provide actual copies of their contents in LostValue and GainedValue and such. So perhaps we have get_value() return a copy of our own value, instead of something that can change.
+
+Hm, this all needs more thought, as it's getting quite complex quite fast.
+
+
+
+
+
+
+
+
+
+
+
+
+
